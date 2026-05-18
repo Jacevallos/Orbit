@@ -1,0 +1,72 @@
+// ContextPilot data model
+// Three tables for v0: Projects, ContextBlocks (the vault), Prompts (history).
+// No User table yet — single-user local app for v0. Add Clerk + userId later.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  goal        String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  contextBlocks ContextBlock[]
+  prompts       Prompt[]
+
+  @@index([createdAt])
+}
+
+model ContextBlock {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  title     String
+  content   String   @db.Text
+  // Tags as a simple string array — Postgres native, no join table needed for v0.
+  tags      String[] @default([])
+  // Higher = pulled into prompt packets first when there are many blocks.
+  priority  Int      @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([projectId, priority])
+}
+
+model Prompt {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // What the user typed
+  userPrompt        String   @db.Text
+  // The full packet sent to the model (context + user prompt, assembled)
+  generatedPacket   String   @db.Text
+  // Which context block IDs were included
+  includedBlockIds  String[] @default([])
+
+  // Model + response
+  modelName         String   // e.g. "claude-opus-4-7"
+  taskType          String?  // "coding" | "research" | "writing" | "planning" | "debugging" | null
+  responseText      String?  @db.Text
+  // Cost/usage tracking — optional, for the dashboard later
+  inputTokens       Int?
+  outputTokens      Int?
+  // Error message if the API call failed
+  errorMessage      String?
+
+  createdAt DateTime @default(now())
+
+  @@index([projectId, createdAt])
+}

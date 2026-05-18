@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 2 26 23;
+  --foreground: 244 244 245;
+  --muted: 94 234 212;
+  --border: 17 94 89;
+  --accent: 45 212 191;
+}
+
+html, body {
+  background: rgb(var(--background));
+  color: rgb(var(--foreground));
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
