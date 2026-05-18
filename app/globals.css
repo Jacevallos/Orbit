@@ -15,3 +15,25 @@ html, body {
   color: rgb(var(--foreground));
   font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
 }
+
+/* Scrollbar — WebKit (Chrome, Edge, Safari) */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #021a17;
+}
+::-webkit-scrollbar-thumb {
+  background: #0d4a3a;
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #14664f;
+}
+
+/* Scrollbar — Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #0d4a3a #021a17;
+}

@@ -7,8 +7,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model Project {
@@ -65,6 +66,8 @@ model Prompt {
   outputTokens      Int?
   // Error message if the API call failed
   errorMessage      String?
+  // Full chat history: [{role:"user"|"assistant", content:string}]
+  messages          Json     @default("[]")
 
   createdAt DateTime @default(now())
 

@@ -1,20 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { buildPromptPacket, type TaskType } from "@/lib/prompt-packet";
-import { runAnthropic, DEFAULT_CLAUDE_MODEL } from "@/lib/anthropic";
+import { buildSystemPrompt, buildPromptPacket, type TaskType } from "@/lib/prompt-packet";
+import { runAnthropic, DEFAULT_CLAUDE_MODEL, type FileAttachment, type ContextFileBlock } from "@/lib/anthropic";
+import type { ContextBlock } from "@prisma/client";
 
 interface Params {
   params: { id: string };
 }
 
-// POST /api/projects/[id]/prompts
-// Body: { userPrompt, taskType?, model?, includedBlockIds? }
-//
-// If `includedBlockIds` is omitted, all of the project's context blocks are
-// included. If it's an array (even empty), only those blocks are used.
+function getContextFileBlocks(blocks: ContextBlock[]): ContextFileBlock[] {
+  return blocks.flatMap((b) => {
+    const match = b.content.match(/^data:([^;,]+);base64,(.+)$/s);
+    if (!match) return [];
+    return [{ name: b.title, mediaType: match[1], data: match[2] }];
+  });
+}
+
+function getTextOnlyBlocks(blocks: ContextBlock[]): ContextBlock[] {
+  return blocks.filter((b) => !b.content.startsWith("data:"));
+}
+
 export async function POST(req: NextRequest, { params }: Params) {
   const body = await req.json();
-  const { userPrompt, taskType, model, includedBlockIds } = body ?? {};
+  const { userPrompt, taskType, model, includedBlockIds, attachments } = body ?? {};
 
   if (!userPrompt || typeof userPrompt !== "string" || userPrompt.trim().length === 0) {
     return NextResponse.json({ error: "userPrompt is required" }, { status: 400 });
@@ -27,21 +35,29 @@ export async function POST(req: NextRequest, { params }: Params) {
   if (!project)
     return NextResponse.json({ error: "project not found" }, { status: 404 });
 
-  // Filter context blocks if a specific selection was passed.
   const selectedBlocks = Array.isArray(includedBlockIds)
     ? project.contextBlocks.filter((b) => includedBlockIds.includes(b.id))
     : project.contextBlocks;
 
+  const taskTypeParsed = (taskType as TaskType | undefined) ?? null;
+  const textBlocks = getTextOnlyBlocks(selectedBlocks);
+  const contextFileBlocks = getContextFileBlocks(selectedBlocks);
+
+  const system = buildSystemPrompt(
+    { name: project.name, description: project.description, goal: project.goal },
+    textBlocks,
+    taskTypeParsed,
+  );
   const { packet, includedBlockIds: actualIncluded } = buildPromptPacket({
     project: { name: project.name, description: project.description, goal: project.goal },
-    blocks: selectedBlocks,
+    blocks: textBlocks,
     userPrompt,
-    taskType: (taskType as TaskType | undefined) ?? null,
+    taskType: taskTypeParsed,
   });
 
   const modelName = typeof model === "string" && model.length > 0 ? model : DEFAULT_CLAUDE_MODEL;
+  const userAttachments: FileAttachment[] = Array.isArray(attachments) ? attachments : [];
 
-  // Save the prompt row first so we always have a record, even if the API call fails.
   const promptRow = await prisma.prompt.create({
     data: {
       projectId: project.id,
@@ -53,15 +69,26 @@ export async function POST(req: NextRequest, { params }: Params) {
     },
   });
 
-  // Now actually call the model.
   try {
-    const result = await runAnthropic({ model: modelName, prompt: packet });
+    const result = await runAnthropic({
+      model: modelName,
+      system,
+      contextFileBlocks: contextFileBlocks.length > 0 ? contextFileBlocks : undefined,
+      messages: [{ role: "user", content: userPrompt, attachments: userAttachments.length > 0 ? userAttachments : undefined }],
+    });
+
+    const messages = [
+      { role: "user", content: userPrompt, attachments: userAttachments.length > 0 ? userAttachments : undefined },
+      { role: "assistant", content: result.text },
+    ];
+
     const updated = await prisma.prompt.update({
       where: { id: promptRow.id },
       data: {
         responseText: result.text,
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
+        messages,
       },
     });
     return NextResponse.json({ prompt: updated });

@@ -48,6 +48,37 @@ const TASK_HINTS: Record<TaskType, string> = {
     "Lead with the single most important point. Be ruthless about cutting filler.",
 };
 
+// Builds just the context/system portion (no user question) — used for multi-turn chats.
+export function buildSystemPrompt(
+  project: Pick<Project, "name" | "description" | "goal">,
+  blocks: ContextBlock[],
+  taskType?: TaskType | null,
+): string {
+  const ordered = [...blocks].sort((a, b) => {
+    if (b.priority !== a.priority) return b.priority - a.priority;
+    return a.createdAt.getTime() - b.createdAt.getTime();
+  });
+
+  const sections: string[] = [];
+  sections.push(`PROJECT: ${project.name}`);
+  if (project.description) sections.push(`DESCRIPTION: ${project.description}`);
+  if (project.goal) sections.push(`GOAL: ${project.goal}`);
+
+  if (ordered.length > 0) {
+    sections.push("CONTEXT:");
+    for (const block of ordered) {
+      const tagSuffix = block.tags.length > 0 ? ` [${block.tags.join(", ")}]` : "";
+      sections.push(`--- ${block.title}${tagSuffix} ---\n${block.content}`);
+    }
+  }
+
+  if (taskType && TASK_HINTS[taskType]) {
+    sections.push(`APPROACH: ${TASK_HINTS[taskType]}`);
+  }
+
+  return sections.join("\n\n");
+}
+
 export function buildPromptPacket(input: BuildPacketInput): BuildPacketResult {
   const { project, blocks, userPrompt, taskType } = input;
 
