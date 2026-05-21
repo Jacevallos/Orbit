@@ -93,7 +93,7 @@ export function ProjectWorkspace({ project, initialConvId, targetMsgIdx }: Works
         ) : (
           <div className="flex-1 flex flex-col overflow-hidden">
             {/* Toggle button even on empty state */}
-            <div className="px-4 py-3 border-b border-teal-900 flex items-center">
+            <div className="px-4 h-14 border-b border-teal-900 flex items-center">
               <button
                 onClick={() => setSidebarOpen((v) => !v)}
                 className="text-zinc-400 hover:text-zinc-100 transition-colors p-1 rounded"
