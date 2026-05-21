@@ -51,11 +51,11 @@ export function ProjectList({ projects: initial }: { projects: Project[] }) {
   return (
     <ul className="divide-y divide-blue-900 border border-blue-900 rounded-md bg-blue-950">
       {projects.map((p) => (
-        <li key={p.id} className="group relative flex items-stretch">
+        <li key={p.id} className="group relative flex items-stretch hover:bg-blue-900 transition-colors">
           <Link
             href={`/projects/${p.id}`}
             onClick={() => setLoadingId(p.id)}
-            className="flex-1 px-4 py-3 hover:bg-blue-900 transition-colors min-w-0"
+            className="flex-1 px-4 py-3 min-w-0"
           >
             <div className="flex items-center justify-between gap-4">
               <span className="font-medium flex items-center gap-2">
