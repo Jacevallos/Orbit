@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { Prompt, ContextBlock } from "@prisma/client";
 import { ContextVault } from "./ContextVault";
+import { formatTokens } from "@/lib/tokens";
 
 interface Props {
   projectId: string;
@@ -11,6 +12,50 @@ interface Props {
   blocks: ContextBlock[];
   onSelect: (id: string) => void;
   onNewConversation: (conv: Prompt) => void;
+  onDelete: (id: string) => void;
+}
+
+function TokenUsagePanel({ conversations }: { conversations: Prompt[] }) {
+  const tracked = conversations.filter((c) => c.inputTokens != null);
+  if (tracked.length === 0) return null;
+
+  const totalInput = tracked.reduce((s, c) => s + (c.inputTokens ?? 0), 0);
+  const totalOutput = tracked.reduce((s, c) => s + (c.outputTokens ?? 0), 0);
+  const total = totalInput + totalOutput;
+
+  // Visual bar: 200K is Claude's context window size, use as reference
+  const WINDOW = 200_000;
+  const pct = Math.min(100, Math.round((total / WINDOW) * 100));
+
+  return (
+    <div className="shrink-0 border-t border-teal-900">
+      <details>
+        <summary className="px-4 py-2.5 text-xs text-zinc-400 cursor-pointer hover:text-zinc-200 transition-colors select-none uppercase tracking-wide font-medium flex items-center justify-between">
+          <span>Token Usage</span>
+          <span className="normal-case tracking-normal font-normal text-zinc-500">{formatTokens(total)}</span>
+        </summary>
+        <div className="px-4 pb-3 space-y-2.5">
+          {/* Bar */}
+          <div className="h-1.5 rounded-full bg-blue-900 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${pct >= 80 ? "bg-red-500" : pct >= 50 ? "bg-amber-500" : "bg-[#2ee6a6]"}`}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          {/* Numbers */}
+          <div className="flex justify-between text-[11px]">
+            <span className="text-zinc-500">{formatTokens(totalInput)} in</span>
+            <span className="text-zinc-600">{formatTokens(totalOutput)} out</span>
+          </div>
+          {/* Rate limit tip */}
+          <p className="text-[10px] text-zinc-600 leading-relaxed">
+            429 errors mean you&apos;ve exceeded the token rate limit for your API tier.
+            Wait ~60s and retry — limits reset per minute.
+          </p>
+        </div>
+      </details>
+    </div>
+  );
 }
 
 export function ConversationSidebar({
@@ -18,6 +63,7 @@ export function ConversationSidebar({
   conversations,
   selectedId,
   blocks,
+  onDelete,
   onSelect,
   onNewConversation,
 }: Props) {
@@ -28,6 +74,24 @@ export function ConversationSidebar({
   const [includedIds, setIncludedIds] = useState<Set<string>>(
     () => new Set(blocks.map((b) => b.id))
   );
+  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpenId(null);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  async function deleteConversation(id: string) {
+    await fetch(`/api/prompts/${id}`, { method: "DELETE" });
+    setMenuOpenId(null);
+    onDelete(id);
+  }
 
   function toggleBlock(id: string) {
     setIncludedIds((prev) => {
@@ -65,7 +129,7 @@ export function ConversationSidebar({
   return (
     <div className="flex flex-col h-full">
       {/* New chat button */}
-      <div className="p-3 shrink-0 border-b border-teal-900">
+      <div className="px-3 shrink-0 border-b border-teal-900 h-14 flex items-center">
         <button
           onClick={() => { setComposing((v) => !v); setError(null); }}
           className="w-full bg-[#2ee6a6] text-zinc-900 rounded-lg px-3 py-2 text-sm font-medium hover:bg-[#26c98f] transition-colors"
@@ -144,27 +208,83 @@ export function ConversationSidebar({
           <p className="text-xs text-zinc-500 p-4">No conversations yet. Start one above.</p>
         )}
         {conversations.map((conv) => (
-          <button
+          <div
             key={conv.id}
-            onClick={() => onSelect(conv.id)}
-            className={`w-full text-left px-4 py-3 border-b border-teal-900/40 transition-colors ${
+            className={`group relative border-b border-teal-900/40 transition-colors ${
               selectedId === conv.id
                 ? "bg-blue-900 border-l-2 border-l-[#2ee6a6]"
                 : "hover:bg-blue-950"
             }`}
           >
-            <p className="text-sm text-zinc-200 line-clamp-2 leading-snug">
-              {conv.userPrompt}
-            </p>
-            <p className="text-xs text-zinc-500 mt-1">
-              {new Date(conv.createdAt).toLocaleDateString(undefined, {
-                month: "short",
-                day: "numeric",
-              })}
-            </p>
-          </button>
+            {/* Clickable area */}
+            <button
+              onClick={() => onSelect(conv.id)}
+              className="w-full text-left px-4 py-3 pr-8"
+            >
+              <div className="flex items-start gap-1.5">
+                {(conv as any).parentPromptId && (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 mt-1 text-[#2ee6a6]/70">
+                    <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/>
+                    <path d="M6 9v6"/><path d="M18 9a9 9 0 0 1-9 9"/>
+                  </svg>
+                )}
+                <p className="text-sm text-zinc-200 line-clamp-2 leading-snug">
+                  {conv.userPrompt}
+                </p>
+              </div>
+              <div className="flex items-center justify-between mt-1">
+                <p className="text-xs text-zinc-500">
+                  {new Date(conv.createdAt).toLocaleDateString(undefined, {
+                    month: "short",
+                    day: "numeric",
+                  })}
+                </p>
+                {conv.inputTokens != null && (
+                  <p className="text-[10px] text-zinc-600">
+                    {formatTokens((conv.inputTokens ?? 0) + (conv.outputTokens ?? 0))} tok
+                  </p>
+                )}
+              </div>
+            </button>
+
+            {/* Three-dots button */}
+            <button
+              onClick={(e) => { e.stopPropagation(); setMenuOpenId(menuOpenId === conv.id ? null : conv.id); }}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-zinc-500 hover:text-zinc-200 opacity-0 group-hover:opacity-100 transition-opacity"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="12" cy="5" r="2" />
+                <circle cx="12" cy="12" r="2" />
+                <circle cx="12" cy="19" r="2" />
+              </svg>
+            </button>
+
+            {/* Dropdown menu */}
+            {menuOpenId === conv.id && (
+              <div
+                ref={menuRef}
+                className="absolute right-2 top-10 z-50 bg-slate-800 border border-slate-700 rounded-lg shadow-lg py-1 min-w-[120px]"
+              >
+                <button
+                  onClick={() => deleteConversation(conv.id)}
+                  className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-slate-700 hover:text-red-300 transition-colors flex items-center gap-2"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                    <path d="M10 11v6M14 11v6" />
+                    <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                  </svg>
+                  Delete
+                </button>
+              </div>
+            )}
+          </div>
         ))}
       </div>
+
+      {/* Token Usage */}
+      <TokenUsagePanel conversations={conversations} />
 
       {/* Context Vault (collapsible at bottom) */}
       <div className="shrink-0 border-t border-teal-900">

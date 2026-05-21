@@ -8,16 +8,35 @@ interface Params {
   params: { id: string };
 }
 
+// Cap system prompt — Claude claude-sonnet-4-6 has a 200K token context window.
+// 150K chars ≈ 37K tokens, leaving plenty of room for conversation history.
+const MAX_SYSTEM_CHARS = 150_000;
+
+function parseFolderBlock(content: string) {
+  try { const p = JSON.parse(content); return p._folder ? p : null; } catch { return null; }
+}
+
 function getContextFileBlocks(blocks: ContextBlock[]): ContextFileBlock[] {
   return blocks.flatMap((b) => {
-    const match = b.content.match(/^data:([^;,]+);base64,(.+)$/s);
-    if (!match) return [];
-    return [{ name: b.title, mediaType: match[1], data: match[2] }];
+    const dataMatch = b.content.match(/^data:([^;,]+);base64,(.+)$/s);
+    if (dataMatch) return [{ name: b.title, mediaType: dataMatch[1], data: dataMatch[2] }];
+    const folder = parseFolderBlock(b.content);
+    if (folder?.images?.length) {
+      return folder.images.map((img: any) => ({ name: img.name, mediaType: img.mediaType, data: img.data }));
+    }
+    return [];
   });
 }
 
 function getTextOnlyBlocks(blocks: ContextBlock[]): ContextBlock[] {
-  return blocks.filter((b) => !b.content.startsWith("data:"));
+  return blocks
+    .filter((b) => !b.content.startsWith("data:"))
+    .map((b) => {
+      const folder = parseFolderBlock(b.content);
+      if (!folder) return b;
+      const desc = folder.description ? `Description: ${folder.description}\n\n` : "";
+      return { ...b, content: desc + (folder.textContent || "") };
+    });
 }
 
 export async function POST(req: NextRequest, { params }: Params) {
@@ -44,11 +63,16 @@ export async function POST(req: NextRequest, { params }: Params) {
   const contextFileBlocks = getContextFileBlocks(selectedBlocks);
   const userAttachments: FileAttachment[] = Array.isArray(attachments) ? attachments : [];
 
-  const system = buildSystemPrompt(
+  let system = buildSystemPrompt(
     { name: conversation.project.name, description: conversation.project.description, goal: conversation.project.goal },
     textBlocks,
     conversation.taskType as TaskType | null,
   );
+
+  // Truncate if the context is too large to prevent OOM and Anthropic errors
+  if (system.length > MAX_SYSTEM_CHARS) {
+    system = system.slice(0, MAX_SYSTEM_CHARS) + "\n\n[Context truncated — too large to include in full]";
+  }
 
   const displayMessages = (conversation.messages as ChatMessage[]) ?? [];
   if (displayMessages.length === 0) {
@@ -85,7 +109,14 @@ export async function POST(req: NextRequest, { params }: Params) {
       },
     });
 
-    return NextResponse.json({ conversation: updated, reply: result.text });
+    // Return only a lightweight response — NOT the full conversation object.
+    // Returning updated.messages (which can be huge with large context history) was
+    // causing "Unexpected end of JSON input" on the client due to response body size.
+    return NextResponse.json({
+      reply: result.text,
+      inputTokens: updated.inputTokens,
+      outputTokens: updated.outputTokens,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
     return NextResponse.json({ error: message }, { status: 500 });

@@ -8,16 +8,34 @@ interface Params {
   params: { id: string };
 }
 
+function parseFolderBlock(content: string) {
+  try { const p = JSON.parse(content); return p._folder ? p : null; } catch { return null; }
+}
+
 function getContextFileBlocks(blocks: ContextBlock[]): ContextFileBlock[] {
   return blocks.flatMap((b) => {
-    const match = b.content.match(/^data:([^;,]+);base64,(.+)$/s);
-    if (!match) return [];
-    return [{ name: b.title, mediaType: match[1], data: match[2] }];
+    // Regular image/pdf stored as data URL
+    const dataMatch = b.content.match(/^data:([^;,]+);base64,(.+)$/s);
+    if (dataMatch) return [{ name: b.title, mediaType: dataMatch[1], data: dataMatch[2] }];
+    // Folder block with embedded images
+    const folder = parseFolderBlock(b.content);
+    if (folder?.images?.length) {
+      return folder.images.map((img: any) => ({ name: img.name, mediaType: img.mediaType, data: img.data }));
+    }
+    return [];
   });
 }
 
 function getTextOnlyBlocks(blocks: ContextBlock[]): ContextBlock[] {
-  return blocks.filter((b) => !b.content.startsWith("data:"));
+  return blocks
+    .filter((b) => !b.content.startsWith("data:"))
+    .map((b) => {
+      const folder = parseFolderBlock(b.content);
+      if (!folder) return b;
+      // Replace JSON content with readable text for the system prompt
+      const desc = folder.description ? `Description: ${folder.description}\n\n` : "";
+      return { ...b, content: desc + (folder.textContent || "") };
+    });
 }
 
 export async function POST(req: NextRequest, { params }: Params) {
@@ -43,11 +61,14 @@ export async function POST(req: NextRequest, { params }: Params) {
   const textBlocks = getTextOnlyBlocks(selectedBlocks);
   const contextFileBlocks = getContextFileBlocks(selectedBlocks);
 
-  const system = buildSystemPrompt(
+  let system = buildSystemPrompt(
     { name: project.name, description: project.description, goal: project.goal },
     textBlocks,
     taskTypeParsed,
   );
+  if (system.length > 150_000) {
+    system = system.slice(0, 150_000) + "\n\n[Context truncated — too large to include in full]";
+  }
   const { packet, includedBlockIds: actualIncluded } = buildPromptPacket({
     project: { name: project.name, description: project.description, goal: project.goal },
     blocks: textBlocks,

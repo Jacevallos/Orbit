@@ -68,6 +68,9 @@ model Prompt {
   errorMessage      String?
   // Full chat history: [{role:"user"|"assistant", content:string}]
   messages          Json     @default("[]")
+  // Branch tracking — set when this conversation was forked from another
+  parentPromptId    String?
+  branchPoint       Int?     // index of the message in parent where the fork happened
 
   createdAt DateTime @default(now())
 

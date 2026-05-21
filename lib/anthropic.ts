@@ -33,6 +33,18 @@ export interface ModelRunResult {
   outputTokens: number;
 }
 
+// Anthropic only accepts these four image types
+const SUPPORTED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+
+function normalizeMediaType(mt: string): string {
+  // Windows commonly uses image/jpg — normalize to the IANA-correct image/jpeg
+  return mt === "image/jpg" ? "image/jpeg" : mt;
+}
+
+function isSupportedImage(mt: string): boolean {
+  return SUPPORTED_IMAGE_TYPES.has(normalizeMediaType(mt));
+}
+
 function buildContent(
   text: string,
   attachments?: FileAttachment[],
@@ -47,7 +59,8 @@ function buildContent(
 
   for (const a of att) {
     if (a.mediaType.startsWith("image/")) {
-      blocks.push({ type: "image", source: { type: "base64", media_type: a.mediaType, data: a.data } });
+      if (!isSupportedImage(a.mediaType)) continue; // skip unsupported types silently
+      blocks.push({ type: "image", source: { type: "base64", media_type: normalizeMediaType(a.mediaType), data: a.data } });
     } else if (a.mediaType === "application/pdf") {
       blocks.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data: a.data } });
     } else {
@@ -57,7 +70,8 @@ function buildContent(
 
   for (const c of ctx) {
     if (c.mediaType.startsWith("image/")) {
-      blocks.push({ type: "image", source: { type: "base64", media_type: c.mediaType, data: c.data } });
+      if (!isSupportedImage(c.mediaType)) continue; // skip unsupported types silently
+      blocks.push({ type: "image", source: { type: "base64", media_type: normalizeMediaType(c.mediaType), data: c.data } });
     } else if (c.mediaType === "application/pdf") {
       blocks.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data: c.data } });
     }

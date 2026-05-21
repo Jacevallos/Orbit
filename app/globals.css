@@ -10,10 +10,27 @@
   --accent: 45 212 191;
 }
 
-html, body {
+html {
   background: rgb(var(--background));
+}
+
+body {
+  /* Transparent so fixed -z-10 backgrounds show through.
+     The html background covers the canvas behind everything. */
+  background: transparent;
   color: rgb(var(--foreground));
   font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+/* Animate the site header in/out for full-screen chat mode */
+header {
+  max-height: 80px;
+  overflow: hidden;
+  transition: max-height 300ms ease-in-out;
+}
+
+[data-fullscreen] header {
+  max-height: 0;
 }
 
 /* Scrollbar — WebKit (Chrome, Edge, Safari) */

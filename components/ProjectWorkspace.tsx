@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { Project, ContextBlock, Prompt } from "@prisma/client";
 import { ConversationSidebar } from "./ConversationSidebar";
 import { ChatView } from "./ChatView";
@@ -10,12 +10,34 @@ type ProjectWithRelations = Project & {
   prompts: Prompt[];
 };
 
-export function ProjectWorkspace({ project }: { project: ProjectWithRelations }) {
+interface WorkspaceProps {
+  project: ProjectWithRelations;
+  initialConvId?: string | null;
+  targetMsgIdx?: number | null;
+}
+
+export function ProjectWorkspace({ project, initialConvId, targetMsgIdx }: WorkspaceProps) {
   const [conversations, setConversations] = useState<Prompt[]>(project.prompts);
   const [selectedId, setSelectedId] = useState<string | null>(
-    project.prompts[0]?.id ?? null
+    initialConvId ?? project.prompts[0]?.id ?? null
   );
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // Suppress the outer page scrollbar — the workspace manages its own scrolling
+  useEffect(() => {
+    document.documentElement.style.overflow = "hidden";
+    return () => { document.documentElement.style.overflow = ""; };
+  }, []);
+
+  // Hide the global header when sidebar is closed (full-screen mode)
+  useEffect(() => {
+    if (!sidebarOpen) {
+      document.documentElement.setAttribute("data-fullscreen", "");
+    } else {
+      document.documentElement.removeAttribute("data-fullscreen");
+    }
+    return () => document.documentElement.removeAttribute("data-fullscreen");
+  }, [sidebarOpen]);
 
   const selected = conversations.find((c) => c.id === selectedId) ?? null;
 
@@ -28,11 +50,21 @@ export function ProjectWorkspace({ project }: { project: ProjectWithRelations })
     setConversations((prev) => prev.map((c) => (c.id === conv.id ? conv : c)));
   }
 
+  function deleteConversation(id: string) {
+    setConversations((prev) => prev.filter((c) => c.id !== id));
+    if (selectedId === id) setSelectedId(conversations.find((c) => c.id !== id)?.id ?? null);
+  }
+
   return (
-    <div className="-mx-6 -my-8 flex overflow-hidden" style={{ height: "calc(100vh - 57px)" }}>
-      {/* Left sidebar */}
-      {sidebarOpen && (
-        <aside className="w-72 shrink-0 border-r border-teal-900 flex flex-col overflow-hidden">
+    <div className="flex overflow-hidden h-full">
+      {/* Left sidebar — always rendered, width animates to 0 when hidden */}
+      <aside
+        className="shrink-0 border-r border-teal-900 flex flex-col overflow-hidden"
+        style={{
+          width: sidebarOpen ? "288px" : "0px",
+          transition: "width 300ms ease-in-out",
+        }}
+      >
           <ConversationSidebar
             projectId={project.id}
             conversations={conversations}
@@ -40,9 +72,9 @@ export function ProjectWorkspace({ project }: { project: ProjectWithRelations })
             blocks={project.contextBlocks}
             onSelect={setSelectedId}
             onNewConversation={addConversation}
+            onDelete={deleteConversation}
           />
-        </aside>
-      )}
+      </aside>
 
       {/* Main chat area */}
       <main className="flex-1 flex flex-col overflow-hidden">
@@ -51,9 +83,12 @@ export function ProjectWorkspace({ project }: { project: ProjectWithRelations })
             key={selected.id}
             conversation={selected}
             blocks={project.contextBlocks}
+            projectName={project.name}
             sidebarOpen={sidebarOpen}
             onToggleSidebar={() => setSidebarOpen((v) => !v)}
             onUpdate={updateConversation}
+            onBranch={addConversation}
+            targetMsgIdx={targetMsgIdx ?? undefined}
           />
         ) : (
           <div className="flex-1 flex flex-col overflow-hidden">
@@ -62,9 +97,23 @@ export function ProjectWorkspace({ project }: { project: ProjectWithRelations })
               <button
                 onClick={() => setSidebarOpen((v) => !v)}
                 className="text-zinc-400 hover:text-zinc-100 transition-colors p-1 rounded"
-                title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+                title={sidebarOpen ? "Go full screen" : "Exit full screen"}
               >
-                {sidebarOpen ? "◀" : "▶"}
+                {sidebarOpen ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+                    <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+                    <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+                    <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+                  </svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+                    <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+                    <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+                    <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+                  </svg>
+                )}
               </button>
             </div>
             <div className="flex-1 flex items-center justify-center text-zinc-500 text-sm">

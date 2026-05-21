@@ -2,6 +2,7 @@ import "./globals.css";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { BackButton } from "@/components/BackButton";
+import { GlobalSearch } from "@/components/GlobalSearch";
 
 export const metadata: Metadata = {
   title: "Orbit",
@@ -11,7 +12,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body>
+      <body className="flex flex-col h-screen">
         <header className="border-b border-teal-900 bg-[#021a17]/80 backdrop-blur sticky top-0 z-10">
           <div className="max-w-5xl mx-auto px-6 py-4 grid grid-cols-3 items-center">
             <div><BackButton /></div>
@@ -30,11 +31,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               </Link>
             </div>
             <div className="flex justify-end">
-              <span className="text-xs text-zinc-500">v0 · single-user</span>
+              <GlobalSearch />
             </div>
           </div>
         </header>
-        <main className="max-w-5xl mx-auto px-6 py-8">{children}</main>
+        <main className="flex-1 min-h-0">{children}</main>
       </body>
     </html>
   );
