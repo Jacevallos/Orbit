@@ -2,15 +2,30 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { buildSystemPrompt, type TaskType } from "@/lib/prompt-packet";
 import { runAnthropic, type ChatMessage, type FileAttachment, type ContextFileBlock } from "@/lib/anthropic";
+import { logger } from "@/lib/logger";
 import type { ContextBlock } from "@prisma/client";
 
 interface Params {
   params: { id: string };
 }
 
+function stripNullBytes(s: string): string {
+  return s.replace(/\x00/g, "");
+}
+
+function smartTruncate(system: string, maxChars: number): string {
+  if (system.length <= maxChars) return system;
+  const candidate = system.slice(0, maxChars);
+  const lastBoundary = candidate.lastIndexOf("\n\n--- ");
+  if (lastBoundary > maxChars * 0.5) {
+    return candidate.slice(0, lastBoundary) + "\n\n[Some files omitted — codebase too large to fit entirely in context window]";
+  }
+  return candidate + "\n\n[Context truncated — too large to include in full]";
+}
+
 // Cap system prompt — Claude claude-sonnet-4-6 has a 200K token context window.
 // 150K chars ≈ 37K tokens, leaving plenty of room for conversation history.
-const MAX_SYSTEM_CHARS = 150_000;
+const MAX_SYSTEM_CHARS = 600_000;
 
 function parseFolderBlock(content: string) {
   try { const p = JSON.parse(content); return p._folder ? p : null; } catch { return null; }
@@ -69,10 +84,8 @@ export async function POST(req: NextRequest, { params }: Params) {
     conversation.taskType as TaskType | null,
   );
 
-  // Truncate if the context is too large to prevent OOM and Anthropic errors
-  if (system.length > MAX_SYSTEM_CHARS) {
-    system = system.slice(0, MAX_SYSTEM_CHARS) + "\n\n[Context truncated — too large to include in full]";
-  }
+  system = stripNullBytes(system);
+  system = smartTruncate(system, MAX_SYSTEM_CHARS);
 
   const displayMessages = (conversation.messages as ChatMessage[]) ?? [];
   if (displayMessages.length === 0) {
@@ -86,6 +99,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     ...(userAttachments.length > 0 ? { attachments: userAttachments } : {}),
   };
 
+  logger.info("message.start", { promptId: params.id, model: conversation.modelName });
   try {
     const result = await runAnthropic({
       model: conversation.modelName,
@@ -112,6 +126,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     // Return only a lightweight response — NOT the full conversation object.
     // Returning updated.messages (which can be huge with large context history) was
     // causing "Unexpected end of JSON input" on the client due to response body size.
+    logger.info("message.complete", { promptId: params.id, inputTokens: result.inputTokens, outputTokens: result.outputTokens, cacheCreation: result.cacheCreationTokens, cacheRead: result.cacheReadTokens });
     return NextResponse.json({
       reply: result.text,
       inputTokens: updated.inputTokens,
@@ -119,6 +134,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
+    logger.error("message.failed", { promptId: params.id, error: message });
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

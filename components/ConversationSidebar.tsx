@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import type { Prompt, ContextBlock } from "@prisma/client";
 import { ContextVault } from "./ContextVault";
 import { formatTokens } from "@/lib/tokens";
+import { ErrorToast } from "@/components/ErrorToast";
 
 interface Props {
   projectId: string;
@@ -114,7 +115,10 @@ export function ConversationSidebar({
           includedBlockIds: Array.from(includedIds),
         }),
       });
-      const json = await res.json();
+      let json: any;
+      try { json = await res.json(); } catch {
+        throw new Error("Response too large — try deselecting some context blocks.");
+      }
       if (!res.ok) throw new Error(json.error || "failed");
       onNewConversation(json.prompt);
       setPrompt("");
@@ -191,13 +195,18 @@ export function ConversationSidebar({
               </div>
             </details>
           )}
-          {error && <p className="text-xs text-red-400">{error}</p>}
+          {error && <ErrorToast error={error} onDismiss={() => setError(null)} />}
           <button
             onClick={startConversation}
             disabled={sending || !prompt.trim()}
             className="w-full bg-[#2ee6a6] text-zinc-900 rounded-lg px-3 py-2 text-sm font-medium disabled:opacity-50 hover:bg-[#26c98f] transition-colors"
           >
-            {sending ? "Starting…" : "Start Chat"}
+            {sending ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="inline-block w-3 h-3 rounded-full border-2 border-zinc-900/20 border-t-zinc-900 animate-spin" />
+                Starting…
+              </span>
+            ) : "Start Chat"}
           </button>
         </div>
       )}

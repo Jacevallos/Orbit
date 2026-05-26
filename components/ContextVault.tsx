@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import type { ContextBlock } from "@prisma/client";
+import { ErrorToast } from "@/components/ErrorToast";
 
 interface Props {
   projectId: string;
@@ -76,8 +77,8 @@ export function ContextVault({ projectId, blocks }: Props) {
         ".parcel-cache", ".turbo", ".svelte-kit", "storybook-static",
       ]);
 
-      const MAX_FILE_CHARS = 150_000;   // 150KB per file
-      const MAX_TOTAL_CHARS = 2_000_000; // 2MB total text
+      const MAX_FILE_CHARS = 500_000;   // 500KB per file
+      const MAX_TOTAL_CHARS = 8_000_000; // 8MB total text
       const MAX_IMAGES = 10;
 
       const shouldSkip = (relPath: string) =>
@@ -95,10 +96,16 @@ export function ContextVault({ projectId, blocks }: Props) {
         return 5;
       }
 
-      const sortedFiles = [...allFiles].sort(
-        (a, b) => filePriority((a as any).webkitRelativePath || a.name)
-                - filePriority((b as any).webkitRelativePath || b.name)
-      );
+      const sortedFiles = [...allFiles].sort((a, b) => {
+        const pa = filePriority((a as any).webkitRelativePath || a.name);
+        const pb = filePriority((b as any).webkitRelativePath || b.name);
+        if (pa !== pb) return pa - pb;
+        // Within same priority: sort by basename alphabetically so subdirectory
+        // files are interleaved with root files instead of all appearing at the end.
+        const na = ((a as any).webkitRelativePath || a.name).split("/").pop()?.toLowerCase() ?? "";
+        const nb = ((b as any).webkitRelativePath || b.name).split("/").pop()?.toLowerCase() ?? "";
+        return na.localeCompare(nb);
+      });
 
       const parts: string[] = [];
       const images: { name: string; mediaType: string; data: string }[] = [];
@@ -378,7 +385,7 @@ export function ContextVault({ projectId, blocks }: Props) {
             </button>
           )}
 
-          {generateError && <p className="text-xs text-red-400">{generateError}</p>}
+          {generateError && <ErrorToast error={generateError} onDismiss={() => setGenerateError(null)} durationMs={30_000} />}
 
           {/* Suggested blocks preview */}
           {suggestedBlocks && (
@@ -429,7 +436,12 @@ export function ContextVault({ projectId, blocks }: Props) {
                   disabled={submitting || selectedSuggestions.size === 0}
                   className="flex-1 bg-[#2ee6a6] text-zinc-900 rounded px-3 py-1.5 text-sm font-medium disabled:opacity-50 hover:bg-[#26c98f] transition-colors"
                 >
-                  {submitting ? "Saving…" : `Save folder + ${selectedSuggestions.size} block${selectedSuggestions.size !== 1 ? "s" : ""}`}
+                  {submitting ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <span className="inline-block w-3 h-3 rounded-full border-2 border-zinc-900/20 border-t-zinc-900 animate-spin" />
+                      Saving…
+                    </span>
+                  ) : `Save folder + ${selectedSuggestions.size} block${selectedSuggestions.size !== 1 ? "s" : ""}`}
                 </button>
                 <button
                   onClick={saveFolderBlock}
@@ -448,7 +460,12 @@ export function ContextVault({ projectId, blocks }: Props) {
               disabled={submitting}
               className="w-full bg-[#2ee6a6] text-zinc-900 rounded px-3 py-1.5 text-sm font-medium disabled:opacity-50 hover:bg-[#26c98f] transition-colors"
             >
-              {submitting ? "Saving…" : "Save to Context Vault"}
+              {submitting ? (
+                <span className="flex items-center justify-center gap-2">
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-zinc-900/20 border-t-zinc-900 animate-spin" />
+                  Saving…
+                </span>
+              ) : "Save to Context Vault"}
             </button>
           )}
         </div>
@@ -492,7 +509,12 @@ export function ContextVault({ projectId, blocks }: Props) {
             disabled={submitting || !title.trim() || !content.trim()}
             className="bg-[#2ee6a6] text-zinc-900 rounded px-3 py-1.5 text-sm font-medium disabled:opacity-50 hover:bg-[#26c98f] transition-colors"
           >
-            {submitting ? "Saving…" : "Save block"}
+            {submitting ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="inline-block w-3 h-3 rounded-full border-2 border-zinc-900/20 border-t-zinc-900 animate-spin" />
+                Saving…
+              </span>
+            ) : "Save block"}
           </button>
         </div>
       )}
@@ -563,7 +585,7 @@ export function ContextVault({ projectId, blocks }: Props) {
             <p className="text-xs font-medium text-zinc-300">✨ {suggestedBlocks.length} generated blocks</p>
             <button onClick={() => { setSuggestedBlocks(null); setSelectedSuggestions(new Set()); setGenerateError(null); }} className="text-xs text-zinc-500 hover:text-red-400 transition-colors">Dismiss</button>
           </div>
-          {generateError && <p className="text-xs text-red-400">{generateError}</p>}
+          {generateError && <ErrorToast error={generateError} onDismiss={() => setGenerateError(null)} durationMs={30_000} />}
           <div className="space-y-1.5">
             {suggestedBlocks.map((b, i) => (
               <div key={i} className={`rounded-lg border transition-colors ${selectedSuggestions.has(i) ? "border-[#2ee6a6]/40 bg-[#2ee6a6]/5" : "border-blue-800 bg-[#0f1d3a]/50"}`}>
@@ -601,7 +623,12 @@ export function ContextVault({ projectId, blocks }: Props) {
             disabled={submitting || selectedSuggestions.size === 0}
             className="w-full bg-[#2ee6a6] text-zinc-900 rounded px-3 py-1.5 text-sm font-medium disabled:opacity-50 hover:bg-[#26c98f] transition-colors"
           >
-            {submitting ? "Saving…" : `Add ${selectedSuggestions.size} block${selectedSuggestions.size !== 1 ? "s" : ""} to vault`}
+            {submitting ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="inline-block w-3 h-3 rounded-full border-2 border-zinc-900/20 border-t-zinc-900 animate-spin" />
+                Saving…
+              </span>
+            ) : `Add ${selectedSuggestions.size} block${selectedSuggestions.size !== 1 ? "s" : ""} to vault`}
           </button>
         </div>
       )}

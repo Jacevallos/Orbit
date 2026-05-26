@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { runAnthropic, DEFAULT_CLAUDE_MODEL } from "@/lib/anthropic";
+import { logger } from "@/lib/logger";
 
 interface Params {
   params: { id: string };
@@ -41,14 +42,15 @@ export async function POST(req: NextRequest, { params }: Params) {
   const project = await prisma.project.findUnique({ where: { id: params.id } });
   if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
 
-  const userMessage = `Analyze this codebase for the project "${project.name}" and generate context blocks.\n\n${textContent.slice(0, 150_000)}`;
+  const userMessage = `Analyze this codebase for the project "${project.name}" and generate context blocks.\n\n${textContent.slice(0, 600_000)}`;
 
+  logger.info("generate-context.start", { projectId: params.id });
   try {
     const result = await runAnthropic({
       model: DEFAULT_CLAUDE_MODEL,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userMessage }],
-      maxTokens: 4096,
+      maxTokens: 16000,
     });
 
     // Strip any markdown code fences Claude might have added
@@ -57,9 +59,11 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     if (!Array.isArray(parsed.blocks)) throw new Error("Invalid response format");
 
+    logger.info("generate-context.complete", { projectId: params.id, blockCount: parsed.blocks.length });
     return NextResponse.json({ blocks: parsed.blocks });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to generate context";
+    logger.error("generate-context.failed", { projectId: params.id, error: message });
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

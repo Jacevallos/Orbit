@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { buildSystemPrompt, buildPromptPacket, type TaskType } from "@/lib/prompt-packet";
 import { runAnthropic, DEFAULT_CLAUDE_MODEL, type FileAttachment, type ContextFileBlock } from "@/lib/anthropic";
+import { logger } from "@/lib/logger";
 import type { ContextBlock } from "@prisma/client";
 
 interface Params {
@@ -38,6 +39,24 @@ function getTextOnlyBlocks(blocks: ContextBlock[]): ContextBlock[] {
     });
 }
 
+// PostgreSQL rejects null bytes in text columns (error 22021).
+// Strip them from any string before it touches the DB or gets sent to Claude.
+function stripNullBytes(s: string): string {
+  return s.replace(/\x00/g, "");
+}
+
+// Truncate at a complete file boundary (--- path ---) rather than slicing mid-file,
+// so partial file content doesn't waste context or confuse the model.
+function smartTruncate(system: string, maxChars: number): string {
+  if (system.length <= maxChars) return system;
+  const candidate = system.slice(0, maxChars);
+  const lastBoundary = candidate.lastIndexOf("\n\n--- ");
+  if (lastBoundary > maxChars * 0.5) {
+    return candidate.slice(0, lastBoundary) + "\n\n[Some files omitted — codebase too large to fit entirely in context window]";
+  }
+  return candidate + "\n\n[Context truncated — too large to include in full]";
+}
+
 export async function POST(req: NextRequest, { params }: Params) {
   const body = await req.json();
   const { userPrompt, taskType, model, includedBlockIds, attachments } = body ?? {};
@@ -66,9 +85,8 @@ export async function POST(req: NextRequest, { params }: Params) {
     textBlocks,
     taskTypeParsed,
   );
-  if (system.length > 150_000) {
-    system = system.slice(0, 150_000) + "\n\n[Context truncated — too large to include in full]";
-  }
+  system = stripNullBytes(system);
+  system = smartTruncate(system, 600_000);
   const { packet, includedBlockIds: actualIncluded } = buildPromptPacket({
     project: { name: project.name, description: project.description, goal: project.goal },
     blocks: textBlocks,
@@ -82,14 +100,15 @@ export async function POST(req: NextRequest, { params }: Params) {
   const promptRow = await prisma.prompt.create({
     data: {
       projectId: project.id,
-      userPrompt,
-      generatedPacket: packet,
+      userPrompt: stripNullBytes(userPrompt),
+      generatedPacket: stripNullBytes(packet),
       includedBlockIds: actualIncluded,
       modelName,
       taskType: taskType || null,
     },
   });
 
+  logger.info("prompt.start", { projectId: project.id, model: modelName, promptId: promptRow.id });
   try {
     const result = await runAnthropic({
       model: modelName,
@@ -112,13 +131,20 @@ export async function POST(req: NextRequest, { params }: Params) {
         messages,
       },
     });
-    return NextResponse.json({ prompt: updated });
+    // Strip large fields before sending to client — generatedPacket contains the
+    // full assembled system prompt and messages duplicates responseText; both can
+    // be several MB and cause "Unexpected end of JSON input" on the client.
+    logger.info("prompt.complete", { promptId: promptRow.id, inputTokens: result.inputTokens, outputTokens: result.outputTokens, cacheCreation: result.cacheCreationTokens, cacheRead: result.cacheReadTokens });
+    const { generatedPacket: _gp, messages: _msgs, ...promptForClient } = updated as any;
+    return NextResponse.json({ prompt: promptForClient });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
+    logger.error("prompt.failed", { promptId: promptRow.id, projectId: project.id, error: message });
     const failed = await prisma.prompt.update({
       where: { id: promptRow.id },
       data: { errorMessage: message },
     });
-    return NextResponse.json({ prompt: failed, error: message }, { status: 500 });
+    const { generatedPacket: _gp2, messages: _msgs2, ...failedForClient } = failed as any;
+    return NextResponse.json({ prompt: failedForClient, error: message }, { status: 500 });
   }
 }

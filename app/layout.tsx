@@ -30,7 +30,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 Orbit
               </Link>
             </div>
-            <div className="flex justify-end">
+            <div className="flex justify-end items-center gap-3">
+              <Link href="/logs" className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors" title="View application logs">
+                Logs
+              </Link>
               <GlobalSearch />
             </div>
           </div>

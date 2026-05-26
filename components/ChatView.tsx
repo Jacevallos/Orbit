@@ -8,6 +8,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import type { ChatMessage, FileAttachment } from "@/lib/anthropic";
 import { estimateMessageTokens, formatTokens, tokenColorClass } from "@/lib/tokens";
+import { ErrorToast } from "@/components/ErrorToast";
 
 const codeStyle = {
   ...oneDark,
@@ -274,7 +275,7 @@ interface Props {
 }
 
 function getDisplayMessages(conv: Prompt): ChatMessage[] {
-  const msgs = conv.messages as ChatMessage[];
+  const msgs = (conv as any).messages as unknown as ChatMessage[];
   if (msgs && msgs.length > 0) return msgs;
   const result: ChatMessage[] = [];
   if (conv.userPrompt) result.push({ role: "user", content: conv.userPrompt });
@@ -621,7 +622,7 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
           </div>
         )}
 
-        {error && <p className="text-xs text-red-400">{error}</p>}
+        {error && <ErrorToast error={error} onDismiss={() => setError(null)} />}
 
         {/* Hidden file inputs */}
         <input ref={fileInputRef} type="file" multiple accept={`image/*,application/pdf,${TEXT_EXTENSIONS}`} className="hidden" onChange={(e) => e.target.files && handleFiles(e.target.files)} />

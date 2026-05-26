@@ -31,6 +31,8 @@ export interface ModelRunResult {
   text: string;
   inputTokens: number;
   outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
 }
 
 // Anthropic only accepts these four image types
@@ -112,7 +114,16 @@ export async function runAnthropic(input: ModelRunInput): Promise<ModelRunResult
   const res = await client().messages.create({
     model: input.model,
     max_tokens: input.maxTokens ?? 4096,
-    ...(input.system ? { system: input.system } : {}),
+    // Wrap the system prompt in a cacheable block so Anthropic reuses it across
+    // requests in the same conversation instead of re-processing it every time.
+    // Cache hits cost ~10% of normal input token price (90% discount).
+    ...(input.system ? {
+      system: [{
+        type: "text" as const,
+        text: input.system,
+        cache_control: { type: "ephemeral" as const },
+      }],
+    } : {}),
     messages: anthropicMessages,
   });
 
@@ -121,9 +132,12 @@ export async function runAnthropic(input: ModelRunInput): Promise<ModelRunResult
     .map((b) => b.text)
     .join("\n");
 
+  const usage = res.usage as any;
   return {
     text,
     inputTokens: res.usage.input_tokens,
     outputTokens: res.usage.output_tokens,
+    cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
+    cacheReadTokens: usage.cache_read_input_tokens ?? 0,
   };
 }
