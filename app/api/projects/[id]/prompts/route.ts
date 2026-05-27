@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { buildSystemPrompt, buildPromptPacket, type TaskType } from "@/lib/prompt-packet";
 import { runAnthropic, DEFAULT_CLAUDE_MODEL, type FileAttachment, type ContextFileBlock } from "@/lib/anthropic";
 import { logger } from "@/lib/logger";
+import { smartSearchProjectFiles, buildFileContext, buildSummaryContext, countProjectFiles } from "@/lib/file-search";
 import type { ContextBlock } from "@prisma/client";
 
 interface Params {
@@ -77,9 +78,29 @@ export async function POST(req: NextRequest, { params }: Params) {
     : project.contextBlocks;
 
   const taskTypeParsed = (taskType as TaskType | undefined) ?? null;
-  const textBlocks = getTextOnlyBlocks(selectedBlocks);
+
+  // If project has indexed files, use FTS instead of folder blocks
+  const fileCount = await countProjectFiles(project.id);
+  const useFileFts = fileCount > 0;
+
+  const blocksForContext = useFileFts
+    ? selectedBlocks.filter((b) => !parseFolderBlock(b.content))
+    : selectedBlocks;
+
+  const textBlocks = getTextOnlyBlocks(blocksForContext);
   const contextFileBlocks = getContextFileBlocks(selectedBlocks);
 
+  let fileContextStr = "";
+  if (useFileFts) {
+    const { files, useSummaries } = await smartSearchProjectFiles(project.id, userPrompt, 14);
+    if (files.length > 0) {
+      fileContextStr = useSummaries
+        ? buildSummaryContext(files)
+        : buildFileContext(files, { query: userPrompt });
+    }
+  }
+
+  // Stable system prompt — no file content here so prompt caching always hits.
   let system = buildSystemPrompt(
     { name: project.name, description: project.description, goal: project.goal },
     textBlocks,
@@ -110,11 +131,17 @@ export async function POST(req: NextRequest, { params }: Params) {
 
   logger.info("prompt.start", { projectId: project.id, model: modelName, promptId: promptRow.id });
   try {
+    // Files are injected into the user message for the API call only.
+    // The stored messages use clean userPrompt so history stays small.
+    const apiContent = fileContextStr
+      ? `${fileContextStr}\n\n---\n\n${userPrompt}`
+      : userPrompt;
+
     const result = await runAnthropic({
       model: modelName,
       system,
       contextFileBlocks: contextFileBlocks.length > 0 ? contextFileBlocks : undefined,
-      messages: [{ role: "user", content: userPrompt, attachments: userAttachments.length > 0 ? userAttachments : undefined }],
+      messages: [{ role: "user", content: apiContent, attachments: userAttachments.length > 0 ? userAttachments : undefined }],
     });
 
     const messages = [

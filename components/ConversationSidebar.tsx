@@ -5,6 +5,7 @@ import type { Prompt, ContextBlock } from "@prisma/client";
 import { ContextVault } from "./ContextVault";
 import { formatTokens } from "@/lib/tokens";
 import { ErrorToast } from "@/components/ErrorToast";
+import { AVAILABLE_MODELS, DEFAULT_MODEL_ID } from "@/lib/models";
 
 interface Props {
   projectId: string;
@@ -53,6 +54,10 @@ function TokenUsagePanel({ conversations }: { conversations: Prompt[] }) {
             429 errors mean you&apos;ve exceeded the token rate limit for your API tier.
             Wait ~60s and retry — limits reset per minute.
           </p>
+          {/* Cache tip */}
+          <p className="text-[10px] text-zinc-700 leading-relaxed">
+            Tip: enable <span className="text-zinc-600">extended prompt cache (1-hour TTL)</span> in the Anthropic console under Settings → Prompt caching to cut costs further.
+          </p>
         </div>
       </details>
     </div>
@@ -75,6 +80,7 @@ export function ConversationSidebar({
   const [includedIds, setIncludedIds] = useState<Set<string>>(
     () => new Set(blocks.map((b) => b.id))
   );
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL_ID);
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -113,6 +119,7 @@ export function ConversationSidebar({
         body: JSON.stringify({
           userPrompt: prompt.trim(),
           includedBlockIds: Array.from(includedIds),
+          model: selectedModel,
         }),
       });
       let json: any;
@@ -195,6 +202,24 @@ export function ConversationSidebar({
               </div>
             </details>
           )}
+          {/* Model selector */}
+          <div className="flex gap-1">
+            {AVAILABLE_MODELS.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => setSelectedModel(m.id)}
+                title={m.description}
+                className={`flex-1 py-1 text-[11px] font-medium rounded-md border transition-colors ${
+                  selectedModel === m.id
+                    ? "bg-[#2ee6a6]/15 border-[#2ee6a6]/50 text-[#2ee6a6]"
+                    : "border-blue-800 text-zinc-500 hover:border-blue-600 hover:text-zinc-300"
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+
           {error && <ErrorToast error={error} onDismiss={() => setError(null)} />}
           <button
             onClick={startConversation}

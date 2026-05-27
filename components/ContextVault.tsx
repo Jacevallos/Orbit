@@ -23,6 +23,7 @@ export function ContextVault({ projectId, blocks }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [pendingFolder, setPendingFolder] = useState<{ title: string; content: string } | null>(null);
+  const [pendingFolderFiles, setPendingFolderFiles] = useState<{ path: string; content: string }[]>([]);
   const [folderDescription, setFolderDescription] = useState("");
   const [generatingContext, setGeneratingContext] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
@@ -108,6 +109,7 @@ export function ContextVault({ projectId, blocks }: Props) {
       });
 
       const parts: string[] = [];
+      const fileEntries: { path: string; content: string }[] = [];
       const images: { name: string; mediaType: string; data: string }[] = [];
       let totalChars = 0;
       let skipped = 0;
@@ -139,6 +141,7 @@ export function ContextVault({ projectId, blocks }: Props) {
           let text = await readAsText(file);
           if (text.length > MAX_FILE_CHARS) text = text.slice(0, MAX_FILE_CHARS) + "\n[truncated]";
           parts.push(`--- ${relPath} ---\n${text}`);
+          fileEntries.push({ path: relPath, content: text });
           totalChars += text.length;
           processed++;
         } catch {}
@@ -161,6 +164,7 @@ export function ContextVault({ projectId, blocks }: Props) {
       setUploadProgress(null);
       setFolderDescription("");
       setPendingFolder({ title: blockTitle, content: folderJson });
+      setPendingFolderFiles(fileEntries);
       if (folderInputRef.current) folderInputRef.current.value = "";
       return;
     }
@@ -204,6 +208,17 @@ export function ContextVault({ projectId, blocks }: Props) {
     router.refresh();
   }
 
+  async function indexFiles(files: { path: string; content: string }[]) {
+    if (files.length === 0) return;
+    try {
+      await fetch(`/api/projects/${projectId}/files`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files }),
+      });
+    } catch {}
+  }
+
   async function saveFolderBlock() {
     if (!pendingFolder) return;
     setSubmitting(true);
@@ -228,7 +243,9 @@ export function ContextVault({ projectId, blocks }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: pendingFolder.title, content: finalContent, tags: ["folder"] }),
       });
+      await indexFiles(pendingFolderFiles);
       setPendingFolder(null);
+      setPendingFolderFiles([]);
       setFolderDescription("");
       router.refresh();
     } finally {
@@ -307,7 +324,9 @@ export function ContextVault({ projectId, blocks }: Props) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ title: pendingFolder.title, content: finalContent, tags: ["folder"] }),
         });
+        await indexFiles(pendingFolderFiles);
         setPendingFolder(null);
+        setPendingFolderFiles([]);
         setFolderDescription("");
       }
       setSuggestedBlocks(null);
@@ -356,7 +375,7 @@ export function ContextVault({ projectId, blocks }: Props) {
         <div className="border border-[#2ee6a6]/30 rounded-md bg-blue-950 p-3 space-y-3">
           <div className="flex items-center justify-between">
             <p className="text-xs font-medium text-[#2ee6a6]">📁 {pendingFolder.title}</p>
-            <button onClick={() => { setPendingFolder(null); setSuggestedBlocks(null); setGenerateError(null); }} className="text-xs text-zinc-500 hover:text-red-400 transition-colors">Cancel</button>
+            <button onClick={() => { setPendingFolder(null); setPendingFolderFiles([]); setSuggestedBlocks(null); setGenerateError(null); }} className="text-xs text-zinc-500 hover:text-red-400 transition-colors">Cancel</button>
           </div>
 
           <input

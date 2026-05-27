@@ -7,8 +7,9 @@ import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import type { ChatMessage, FileAttachment } from "@/lib/anthropic";
-import { estimateMessageTokens, formatTokens, tokenColorClass } from "@/lib/tokens";
+import { estimateMessageTokens, estimateCost, formatCost, formatTokens, tokenColorClass } from "@/lib/tokens";
 import { ErrorToast } from "@/components/ErrorToast";
+import { AVAILABLE_MODELS } from "@/lib/models";
 
 const codeStyle = {
   ...oneDark,
@@ -360,6 +361,11 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
   const [activeBlockIds, setActiveBlockIds] = useState<Set<string>>(
     () => new Set((conversation.includedBlockIds as string[]) ?? blocks.map((b) => b.id))
   );
+  const [currentModel, setCurrentModel] = useState(conversation.modelName);
+  const [hasIndexedFiles, setHasIndexedFiles] = useState(false);
+  const [retrievedFiles, setRetrievedFiles] = useState<{ id: string; path: string; selected: boolean }[]>([]);
+  const [searchingFiles, setSearchingFiles] = useState(false);
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
 
   // Stable index of the message to scroll to — provided directly by the search result
   const [searchTargetIdx] = useState(() => targetMsgIdx ?? -1);
@@ -369,6 +375,38 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
   const folderInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isFirstRender = useRef(true);
+
+  // Check if project has indexed files on mount
+  useEffect(() => {
+    const pid = (conversation as any).projectId as string;
+    if (!pid) return;
+    fetch(`/api/projects/${pid}/files`)
+      .then((r) => r.json())
+      .then((d) => setHasIndexedFiles((d.count ?? 0) > 0))
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Debounced file search while user types
+  useEffect(() => {
+    if (!hasIndexedFiles || input.trim().length < 3) {
+      setRetrievedFiles([]);
+      return;
+    }
+    clearTimeout(searchTimeoutRef.current);
+    setSearchingFiles(true);
+    searchTimeoutRef.current = setTimeout(async () => {
+      try {
+        const pid = (conversation as any).projectId as string;
+        const r = await fetch(`/api/projects/${pid}/files/search?q=${encodeURIComponent(input.trim())}`);
+        const d = await r.json();
+        setRetrievedFiles((d.files ?? []).map((f: { id: string; path: string }) => ({ ...f, selected: true })));
+      } catch {}
+      setSearchingFiles(false);
+    }, 700);
+    return () => clearTimeout(searchTimeoutRef.current);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input, hasIndexedFiles]);
 
   // Auto-resize textarea as the user types
   useEffect(() => {
@@ -471,8 +509,11 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
     const userMessage = input.trim();
     const attachments: FileAttachment[] = pendingAttachments.map(({ preview: _, ...a }) => a);
 
+    const selectedFileIds = retrievedFiles.filter((f) => f.selected).map((f) => f.id);
+
     setInput("");
     setPendingAttachments([]);
+    setRetrievedFiles([]);
     setSending(true);
     setError(null);
     setMessages((prev) => [...prev, { role: "user", content: userMessage, attachments: attachments.length > 0 ? attachments : undefined }]);
@@ -481,7 +522,13 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
       const res = await fetch(`/api/prompts/${conversation.id}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: userMessage || " ", includedBlockIds: Array.from(activeBlockIds), attachments }),
+        body: JSON.stringify({
+          content: userMessage || " ",
+          includedBlockIds: Array.from(activeBlockIds),
+          attachments,
+          model: currentModel,
+          ...(selectedFileIds.length > 0 ? { fileIds: selectedFileIds } : {}),
+        }),
       });
       let json: any;
       try {
@@ -598,6 +645,27 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
           </details>
         )}
 
+        {/* Model selector */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] text-zinc-600 shrink-0">Model:</span>
+          <div className="flex gap-1">
+            {AVAILABLE_MODELS.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => setCurrentModel(m.id)}
+                title={m.description}
+                className={`px-2.5 py-0.5 text-[10px] font-medium rounded-full border transition-colors ${
+                  currentModel === m.id
+                    ? "bg-[#2ee6a6]/15 border-[#2ee6a6]/50 text-[#2ee6a6]"
+                    : "border-blue-800 text-zinc-500 hover:border-blue-600 hover:text-zinc-300"
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* Pending attachments preview */}
         {pendingAttachments.length > 0 && (
           <div className="flex flex-wrap gap-2">
@@ -619,6 +687,43 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
                 </button>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Retrieved files panel — shown when project has an indexed file set */}
+        {hasIndexedFiles && (searchingFiles || retrievedFiles.length > 0) && (
+          <div className="border border-blue-800 rounded-lg p-2.5 space-y-1.5 bg-[#080f1f]">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-zinc-400 flex items-center gap-1.5">
+                {searchingFiles ? (
+                  <><span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-zinc-600/30 border-t-zinc-500 animate-spin" />Searching files…</>
+                ) : (
+                  <><span className="text-[#2ee6a6]">⌖</span>{retrievedFiles.filter((f) => f.selected).length} / {retrievedFiles.length} files for this query</>
+                )}
+              </span>
+              {!searchingFiles && (
+                <button onClick={() => setRetrievedFiles([])} className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors">clear</button>
+              )}
+            </div>
+            {!searchingFiles && retrievedFiles.length > 0 && (
+              <div className="space-y-0.5 max-h-28 overflow-y-auto pr-1">
+                {retrievedFiles.map((f) => (
+                  <label key={f.id} className="flex items-center gap-2 cursor-pointer group py-0.5">
+                    <input
+                      type="checkbox"
+                      checked={f.selected}
+                      onChange={() => setRetrievedFiles((prev) =>
+                        prev.map((rf) => rf.id === f.id ? { ...rf, selected: !rf.selected } : rf)
+                      )}
+                      className="accent-[#2ee6a6] shrink-0"
+                    />
+                    <span className="text-[11px] font-mono text-zinc-400 group-hover:text-zinc-200 transition-colors truncate">
+                      {f.path}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -658,13 +763,26 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
           {/* Send button + token count stacked */}
           <div className="flex flex-col items-center gap-1 shrink-0 self-end">
             {(input.trim().length > 0 || pendingAttachments.length > 0) && (() => {
-              const count = estimateMessageTokens(input, pendingAttachments);
-              const colorClass = tokenColorClass(count);
-              const bgClass = count >= 50_000 ? "bg-red-500/15" : count >= 10_000 ? "bg-amber-500/15" : "bg-[#2ee6a6]/10";
+              const msgTokens = estimateMessageTokens(input, pendingAttachments);
+              // Rough total context: current message + history + system prompt + optional file context
+              const historyTokens = messages.length * 900;
+              const systemTokens = 2_500;
+              const fileTokens = hasIndexedFiles ? 5_000 : 0;
+              const totalInput = msgTokens + historyTokens + systemTokens + fileTokens;
+              const estimatedOutput = 2_000;
+              const modelInfo = AVAILABLE_MODELS.find((m) => m.id === currentModel) ?? AVAILABLE_MODELS[1];
+              const cost = estimateCost(totalInput, estimatedOutput, modelInfo.inputPerMTok, modelInfo.outputPerMTok);
+              const colorClass = tokenColorClass(msgTokens);
+              const bgClass = msgTokens >= 50_000 ? "bg-red-500/15" : msgTokens >= 10_000 ? "bg-amber-500/15" : "bg-[#2ee6a6]/10";
               return (
-                <span className={`text-[10px] tabular-nums px-1.5 py-0.5 rounded-md font-medium ${colorClass} ${bgClass}`}>
-                  ~{formatTokens(count)} tok
-                </span>
+                <div className="flex flex-col items-center gap-0.5">
+                  <span className={`text-[10px] tabular-nums px-1.5 py-0.5 rounded-md font-medium ${colorClass} ${bgClass}`}>
+                    ~{formatTokens(msgTokens)} tok
+                  </span>
+                  <span className="text-[9px] tabular-nums text-zinc-600" title={`~${formatTokens(totalInput)} total context tokens`}>
+                    est. {formatCost(cost)}
+                  </span>
+                </div>
               );
             })()}
             <button

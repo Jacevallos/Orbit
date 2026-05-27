@@ -22,8 +22,21 @@ model Project {
 
   contextBlocks ContextBlock[]
   prompts       Prompt[]
+  projectFiles  ProjectFile[]
 
   @@index([createdAt])
+}
+
+model ProjectFile {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  path      String
+  content   String   @db.Text
+  summary   String?  @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
 }
 
 model ContextBlock {

@@ -113,7 +113,7 @@ export async function runAnthropic(input: ModelRunInput): Promise<ModelRunResult
 
   const res = await client().messages.create({
     model: input.model,
-    max_tokens: input.maxTokens ?? 4096,
+    max_tokens: input.maxTokens ?? 8192,
     // Wrap the system prompt in a cacheable block so Anthropic reuses it across
     // requests in the same conversation instead of re-processing it every time.
     // Cache hits cost ~10% of normal input token price (90% discount).
@@ -121,8 +121,8 @@ export async function runAnthropic(input: ModelRunInput): Promise<ModelRunResult
       system: [{
         type: "text" as const,
         text: input.system,
-        cache_control: { type: "ephemeral" as const },
-      }],
+        cache_control: { type: "ephemeral" as const, ttl: "1h" } as any,
+      }] as any,
     } : {}),
     messages: anthropicMessages,
   });

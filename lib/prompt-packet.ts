@@ -76,6 +76,8 @@ export function buildSystemPrompt(
     sections.push(`APPROACH: ${TASK_HINTS[taskType]}`);
   }
 
+  sections.push("RESPONSE STYLE: Be concise and direct. Answer exactly what was asked — no preamble, no restating the question, no closing summary. Prefer short code snippets over long prose explanations. If a detailed breakdown is needed, use it; otherwise keep it tight.");
+
   return sections.join("\n\n");
 }
 
