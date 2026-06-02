@@ -92,9 +92,12 @@ export async function POST(req: NextRequest, { params }: Params) {
 
   let fileContextStr = "";
   if (useFileFts) {
-    const { files, chunks, useSummaries } = await smartSearchProjectFiles(project.id, userPrompt, 14);
+    const { files, chunks, referencedFiles, useSummaries } = await smartSearchProjectFiles(project.id, userPrompt, 14);
     if (chunks.length > 0) {
       fileContextStr = buildChunkContext(chunks);
+      if (referencedFiles.length > 0) {
+        fileContextStr += "\n\n" + buildFileContext(referencedFiles, { query: userPrompt });
+      }
     } else if (files.length > 0) {
       fileContextStr = useSummaries
         ? buildSummaryContext(files)

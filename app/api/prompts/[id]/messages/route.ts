@@ -170,11 +170,17 @@ export async function POST(req: NextRequest, { params }: Params) {
       const hint = buildConversationQueryHint(displayMessages);
       const searchQuery = hint ? `${content.trim()} ${hint}` : content.trim();
 
-      const { files, chunks, useSummaries } = await smartSearchProjectFiles(conversation.projectId, searchQuery, 14);
+      const { files, chunks, referencedFiles, useSummaries } = await smartSearchProjectFiles(conversation.projectId, searchQuery, 14);
       if (chunks.length > 0) {
         fileContextStr = buildChunkContext(chunks);
-        retrievedCount = chunks.length;
-        retrievedPaths = [...new Set(chunks.map((c) => `${c.filePath} (${c.name}, lines ${c.startLine}-${c.endLine})`))];
+        if (referencedFiles.length > 0) {
+          fileContextStr += "\n\n" + buildFileContext(referencedFiles, { query: content });
+        }
+        retrievedCount = chunks.length + referencedFiles.length;
+        retrievedPaths = [
+          ...new Set(chunks.map((c) => `${c.filePath} (${c.name}, lines ${c.startLine}-${c.endLine})`)),
+          ...referencedFiles.map((f) => `${f.path} [referenced]`),
+        ];
       } else if (files.length > 0) {
         fileContextStr = useSummaries
           ? buildSummaryContext(files)

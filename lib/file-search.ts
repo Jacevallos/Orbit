@@ -372,9 +372,52 @@ const RERANK_TARGET = 6; // raised from 5 — aggressive re-ranking was dropping
 // Smart search: FTS first (fast, no extra cost). Falls back to Haiku routing
 // only when FTS finds nothing or the query lacks specific code identifiers.
 // Returns useSummaries=true for broad queries so callers can use buildSummaryContext.
+// After chunk search returns initial results, scan the chunk content for
+// PascalCase class/method names and fetch other files that define or heavily
+// reference those identifiers. This simulates Copilot-style reference following:
+// if OptimizeScan.cs mentions OptimizeQueue.AddEntry(), we pull OptimizeQueue.cs.
+async function expandWithReferences(
+  chunks: CodeChunkResult[],
+  projectId: string,
+  maxExpansions = 3,
+): Promise<ProjectFileResult[]> {
+  if (chunks.length === 0) return [];
+
+  const coveredPaths = [...new Set(chunks.map((c) => c.filePath))];
+  const allContent = chunks.map((c) => c.content).join(" ");
+
+  // Extract PascalCase identifiers (class names, method names) from chunk content
+  const identifiers = [...new Set(
+    [...allContent.matchAll(/\b[A-Z][a-z]+(?:[A-Z][a-z]*)+\b/g)].map((m) => m[0])
+  )].slice(0, 10);
+
+  if (identifiers.length === 0) return [];
+
+  const keywords = identifiers.map((id) => `${id.toLowerCase()}:*`).join(" | ");
+
+  try {
+    const rows = await prisma.$queryRaw<ProjectFileResult[]>`
+      SELECT id, path, content, summary, LEFT(content, 400) as excerpt
+      FROM "ProjectFile"
+      WHERE "projectId" = ${projectId}
+        AND NOT (path = ANY(${coveredPaths}::text[]))
+        AND to_tsvector('simple', content || ' ' || path) @@ to_tsquery('simple', ${keywords})
+      ORDER BY ts_rank(
+        to_tsvector('simple', content || ' ' || path),
+        to_tsquery('simple', ${keywords})
+      ) DESC
+      LIMIT ${maxExpansions}
+    `;
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
 export interface SmartSearchResult {
   files: ProjectFileResult[];
   chunks: CodeChunkResult[];
+  referencedFiles: ProjectFileResult[];
   method: "fts" | "haiku" | "chunks" | "vector";
   useSummaries: boolean;
 }
@@ -385,7 +428,7 @@ export async function smartSearchProjectFiles(
   haikuLimit = 10,
 ): Promise<SmartSearchResult> {
   const codeQuery = hasStrongCodeIdentifiers(query);
-  const empty = { files: [], chunks: [], useSummaries: false };
+  const empty: SmartSearchResult = { files: [], chunks: [], referencedFiles: [], method: "fts", useSummaries: false };
 
   // Path 1: Strong code identifiers — FTS is most reliable for exact symbols
   if (codeQuery) {
@@ -398,14 +441,16 @@ export async function smartSearchProjectFiles(
   }
 
   // Path 2: Chunk-level vector search — most precise for semantic queries.
-  // Retrieves specific functions/classes rather than whole files.
+  // After finding chunks, expand with reference-following to catch connected files
+  // (e.g. OptimizeScan.cs mentions OptimizeQueue → pull OptimizeQueue.cs too).
   const useChunks = await hasChunkIndex(projectId);
   if (useChunks) {
     logger.info("chunk-search.start", { projectId, query: query.slice(0, 80) });
     const chunkResults = await vectorSearchChunks(projectId, query, RERANK_TARGET);
     if (chunkResults.length > 0) {
-      logger.info("chunk-search.complete", { projectId, count: chunkResults.length });
-      return { ...empty, chunks: chunkResults, method: "chunks" };
+      const referencedFiles = await expandWithReferences(chunkResults, projectId);
+      logger.info("chunk-search.complete", { projectId, count: chunkResults.length, expanded: referencedFiles.length });
+      return { ...empty, chunks: chunkResults, referencedFiles, method: "chunks" };
     }
   }
 

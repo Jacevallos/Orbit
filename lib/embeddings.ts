@@ -12,8 +12,8 @@ function client(): VoyageAIClient {
 }
 
 const MODEL = "voyage-code-2";
-const MAX_CHARS = 32_000;
-const BATCH_SIZE = 128;
+const MAX_CHARS = 16_000;
+const BATCH_SIZE = 60; // voyage-code-2 batch limit is 120K tokens; 60 × ~2K tokens = well under limit
 
 // Generate a single query embedding (used at search time)
 export async function embedQuery(text: string): Promise<number[]> {

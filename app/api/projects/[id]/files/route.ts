@@ -83,12 +83,11 @@ export async function POST(req: NextRequest, { params }: Params) {
     logger.info("files.summarized", { projectId: params.id, count: summarized });
 
     // Phase 3: Generate embeddings in one batched Voyage AI call.
-    // We embed path + content excerpt so the vector captures both the file's
-    // identity and its semantic content. Voyage-code-2 is optimised for code.
+    logger.info("files.embed-check", { projectId: params.id, voyageKeyPresent: !!process.env.VOYAGE_API_KEY, voyageKeyLength: process.env.VOYAGE_API_KEY?.length ?? 0 });
     if (process.env.VOYAGE_API_KEY) {
       try {
         const toEmbed = validFiles.map((f: any) =>
-          `${f.path}\n\n${f.content.slice(0, 8_000)}`
+          `${f.path}\n\n${f.content.slice(0, 4_000)}`
         );
         const embeddings = await embedDocuments(toEmbed);
         for (let i = 0; i < validFiles.length; i++) {

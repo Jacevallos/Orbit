@@ -36,7 +36,7 @@ model ProjectFile {
   path      String
   content   String                  @db.Text
   summary   String?                 @db.Text
-  embedding Unsupported("vector(1024)")?
+  embedding Unsupported("vector(1536)")?
   createdAt DateTime                @default(now())
 
   @@index([projectId])
@@ -62,7 +62,7 @@ model ProjectFileChunk {
   content   String                       @db.Text
   startLine Int
   endLine   Int
-  embedding Unsupported("vector(1024)")?
+  embedding Unsupported("vector(1536)")?
   createdAt DateTime                     @default(now())
 
   @@index([projectId])
