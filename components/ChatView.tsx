@@ -352,6 +352,328 @@ function readAsText(file: File): Promise<string> {
   });
 }
 
+const DOC_TYPES = [
+  { id: "notes",      label: "Technical Notes",             icon: "📝" },
+  { id: "adr",        label: "Architecture Decision Record", icon: "🏛"  },
+  { id: "onboarding", label: "Onboarding Guide",            icon: "🗺"  },
+  { id: "runbook",    label: "Runbook",                     icon: "📋" },
+] as const;
+
+// Lightweight markdown → HTML converter for print/download output.
+// Handles the patterns our doc generator produces: headings, bold, italic,
+// inline code, fenced code blocks, bullet lists, and horizontal rules.
+function mdToHtml(md: string): string {
+  const codeBlocks: string[] = [];
+
+  // Stash fenced code blocks so inner content isn't processed
+  let html = md.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code) => {
+    const escaped = code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    codeBlocks.push(`<pre><code>${escaped}</code></pre>`);
+    return `\x00BLOCK${codeBlocks.length - 1}\x00`;
+  });
+
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, (_, c) =>
+    `<code>${c.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code>`
+  );
+
+  // Bold + italic, then bold, then italic
+  html = html.replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>");
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\*([^*\n]+?)\*/g, "<em>$1</em>");
+
+  const lines = html.split("\n");
+  const out: string[] = [];
+  let inList = false;
+
+  for (const line of lines) {
+    const t = line.trim();
+    if (t.startsWith("### "))      { if (inList) { out.push("</ul>"); inList = false; } out.push(`<h3>${t.slice(4)}</h3>`); }
+    else if (t.startsWith("## ")) { if (inList) { out.push("</ul>"); inList = false; } out.push(`<h2>${t.slice(3)}</h2>`); }
+    else if (t.startsWith("# "))  { if (inList) { out.push("</ul>"); inList = false; } out.push(`<h1>${t.slice(2)}</h1>`); }
+    else if (t.startsWith("- ") || t.startsWith("* ")) { if (!inList) { out.push("<ul>"); inList = true; } out.push(`<li>${t.slice(2)}</li>`); }
+    else if (t === "---")          { if (inList) { out.push("</ul>"); inList = false; } out.push("<hr>"); }
+    else if (t === "")             { if (inList) { out.push("</ul>"); inList = false; } }
+    else if (t.startsWith("\x00BLOCK")) {
+      if (inList) { out.push("</ul>"); inList = false; }
+      const idx = parseInt(t.replace(/\x00BLOCK(\d+)\x00/, "$1"));
+      out.push(codeBlocks[idx] ?? "");
+    }
+    else { if (inList) { out.push("</ul>"); inList = false; } out.push(`<p>${line}</p>`); }
+  }
+  if (inList) out.push("</ul>");
+  return out.join("\n");
+}
+
+const PRINT_CSS = `
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Georgia,'Times New Roman',serif;font-size:12pt;line-height:1.75;color:#1a1a1a;max-width:760px;margin:0 auto;padding:52px 64px;background:#fff}
+  h1{font-size:22pt;font-weight:700;padding-bottom:10px;border-bottom:2.5px solid #1a1a1a;margin-bottom:6px;letter-spacing:-.3px}
+  h2{font-size:11pt;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#444;margin-top:30px;margin-bottom:8px}
+  h3{font-size:12pt;font-weight:700;margin-top:20px;margin-bottom:4px}
+  p{margin-bottom:12px}
+  ul{margin:6px 0 14px 22px}
+  li{margin-bottom:5px}
+  code{font-family:'Courier New',monospace;font-size:9.5pt;background:#f4f4f4;border:1px solid #ddd;padding:1px 5px;border-radius:3px}
+  pre{background:#f7f7f7;border:1px solid #e0e0e0;border-radius:4px;padding:14px 18px;overflow:auto;margin:12px 0 16px}
+  pre code{background:none;border:none;padding:0;font-size:9.5pt;line-height:1.5}
+  strong{font-weight:700}em{font-style:italic}
+  hr{border:none;border-top:1px solid #ccc;margin:24px 0}
+  .meta{font-family:Arial,sans-serif;font-size:9.5pt;color:#888;margin-top:4px}
+  @media print{body{padding:0;max-width:100%}@page{margin:1in}}
+`;
+
+async function downloadAsPdf(content: string, label: string, filename: string) {
+  const { jsPDF } = await import("jspdf");
+  const doc = new jsPDF({ unit: "pt", format: "letter" });
+
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const ML = 72; // 1-inch margins
+  const colW = pageW - ML * 2;
+  let y = ML;
+
+  const date = new Date().toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
+
+  // Meta line
+  doc.setFontSize(9); doc.setFont("helvetica", "normal"); doc.setTextColor(150, 150, 150);
+  doc.text(`${label}  ·  ${date}`, ML, y);
+  y += 22;
+
+  const addWrapped = (text: string, size: number, bold: boolean, r: number, g: number, b: number, indent = 0, leading = 1.45) => {
+    doc.setFontSize(size); doc.setFont("helvetica", bold ? "bold" : "normal"); doc.setTextColor(r, g, b);
+    const lines = doc.splitTextToSize(text, colW - indent);
+    const lh = size * leading;
+    if (y + lines.length * lh > pageH - ML) { doc.addPage(); y = ML; }
+    doc.text(lines, ML + indent, y);
+    y += lines.length * lh;
+  };
+
+  let inCode = false;
+  for (const line of content.split("\n")) {
+    if (line.startsWith("```")) { inCode = !inCode; if (!inCode) y += 6; continue; }
+
+    if (inCode) {
+      const lh = 11;
+      doc.setFontSize(8.5); doc.setFont("courier", "normal"); doc.setTextColor(60, 60, 60);
+      const ls = doc.splitTextToSize(line || " ", colW - 20);
+      if (y + ls.length * lh > pageH - ML) { doc.addPage(); y = ML; }
+      doc.text(ls, ML + 10, y); y += ls.length * lh;
+      continue;
+    }
+
+    const t = line.trim();
+    const plain = (s: string) => s.replace(/\*\*(.+?)\*\*/g, "$1").replace(/`(.+?)`/g, "$1").replace(/\*(.+?)\*/g, "$1");
+
+    if (t.startsWith("# ")) {
+      y += 10;
+      addWrapped(plain(t.slice(2)), 20, true, 10, 10, 10);
+      doc.setDrawColor(20, 20, 20); doc.setLineWidth(1.5);
+      doc.line(ML, y + 2, pageW - ML, y + 2); y += 14;
+    } else if (t.startsWith("## ")) {
+      y += 16;
+      doc.setFontSize(8.5); doc.setFont("helvetica", "bold"); doc.setTextColor(120, 120, 120);
+      doc.text(plain(t.slice(3)).toUpperCase(), ML, y); y += 14;
+    } else if (t.startsWith("### ")) {
+      y += 8; addWrapped(plain(t.slice(4)), 11, true, 30, 30, 30); y += 2;
+    } else if (t.startsWith("- ") || t.startsWith("* ")) {
+      doc.setFontSize(10); doc.setFont("helvetica", "normal"); doc.setTextColor(50, 50, 50);
+      doc.text("•", ML, y);
+      addWrapped(plain(t.slice(2)), 10, false, 50, 50, 50, 14, 1.5);
+    } else if (t === "---") {
+      y += 8; doc.setDrawColor(200, 200, 200); doc.setLineWidth(0.5);
+      doc.line(ML, y, pageW - ML, y); y += 14;
+    } else if (t === "") {
+      y += 9;
+    } else {
+      addWrapped(plain(t), 10.5, false, 50, 50, 50, 0, 1.55); y += 4;
+    }
+  }
+
+  doc.save(filename);
+}
+
+function downloadFile(content: string, filename: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function buildDocxHtml(content: string, label: string): string {
+  const date = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  return `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><title>${label}</title><style>${PRINT_CSS}</style></head><body><p class="meta">${label} &nbsp;·&nbsp; ${date}</p>${mdToHtml(content)}</body></html>`;
+}
+
+function GenerateDocModal({ conversationId, onClose }: { conversationId: string; onClose: () => void }) {
+  const [docType, setDocType] = useState<string>("notes");
+  const [generating, setGenerating] = useState(false);
+  const [result, setResult] = useState<{ content: string; label: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  async function generate() {
+    setGenerating(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/prompts/${conversationId}/generate-doc`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ docType }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "failed");
+      setResult(json);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  const slug = result?.label.toLowerCase().replace(/\s+/g, "-") ?? "document";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+      <div className="w-full max-w-3xl bg-[#060e1e] border border-blue-900 rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-blue-900/60 shrink-0">
+          <div className="flex items-center gap-3">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2ee6a6" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
+              <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+            </svg>
+            <span className="text-sm font-semibold text-zinc-200">
+              {result ? result.label : "Generate Documentation"}
+            </span>
+            {result && (
+              <span className="text-[10px] text-zinc-400 uppercase tracking-widest">
+                {new Date().toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+              </span>
+            )}
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200 transition-colors p-1">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto">
+          {!result ? (
+            <div className="p-6 space-y-5">
+              <p className="text-sm text-zinc-500">Choose a format — Orbit will generate it from this conversation using Claude.</p>
+              <div className="grid grid-cols-2 gap-3">
+                {DOC_TYPES.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => setDocType(t.id)}
+                    className={`flex items-start gap-3 px-4 py-3.5 rounded-xl border text-left transition-all ${
+                      docType === t.id
+                        ? "bg-[#2ee6a6]/10 border-[#2ee6a6]/40 text-[#2ee6a6]"
+                        : "border-blue-900 text-zinc-400 hover:border-blue-700 hover:text-zinc-200 hover:bg-blue-950/40"
+                    }`}
+                  >
+                    <span className="text-xl mt-0.5">{t.icon}</span>
+                    <span className="text-sm font-medium leading-snug">{t.label}</span>
+                  </button>
+                ))}
+              </div>
+              {error && <p className="text-xs text-red-400 bg-red-500/10 px-3 py-2 rounded-lg">{error}</p>}
+            </div>
+          ) : (
+            /* Document preview — white "paper" card */
+            <div className="p-6">
+              <div className="bg-white rounded-xl shadow-sm border border-zinc-200 px-10 py-8 min-h-64">
+                <div className="prose prose-zinc max-w-none
+                  prose-headings:font-bold prose-headings:text-zinc-900
+                  prose-h1:text-2xl prose-h1:pb-3 prose-h1:border-b-2 prose-h1:border-zinc-900 prose-h1:mb-2
+                  prose-h2:text-[11px] prose-h2:uppercase prose-h2:tracking-widest prose-h2:text-zinc-500 prose-h2:mt-8 prose-h2:mb-2
+                  prose-h3:text-sm prose-h3:text-zinc-800
+                  prose-p:text-zinc-700 prose-p:leading-relaxed prose-p:text-sm
+                  prose-li:text-zinc-700 prose-li:text-sm
+                  prose-code:text-[#c2410c] prose-code:bg-orange-50 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-xs prose-code:font-mono prose-code:before:content-none prose-code:after:content-none
+                  prose-pre:bg-zinc-50 prose-pre:border prose-pre:border-zinc-200 prose-pre:text-xs
+                  prose-strong:text-zinc-900
+                  prose-hr:border-zinc-200">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {result.content}
+                  </ReactMarkdown>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-4 border-t border-blue-900/60 shrink-0 flex items-center justify-between gap-3">
+          {result ? (
+            <>
+              <button
+                onClick={() => { setResult(null); setError(null); }}
+                className="flex items-center gap-1.5 text-xs text-zinc-300 hover:text-white transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                Back
+              </button>
+              <div className="flex items-center gap-2">
+                {/* Copy */}
+                <button
+                  onClick={() => { navigator.clipboard.writeText(result.content).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }); }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-800 text-zinc-400 hover:text-zinc-200 hover:border-blue-600 transition-colors text-xs"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  {copied ? "Copied!" : "Copy Text"}
+                </button>
+                {/* Download Markdown */}
+                <button
+                  onClick={() => downloadFile(result.content, `${slug}.md`, "text/markdown")}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-800 text-zinc-400 hover:text-zinc-200 hover:border-blue-600 transition-colors text-xs"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Markdown
+                </button>
+                {/* Download Word */}
+                <button
+                  onClick={() => downloadFile(buildDocxHtml(result.content, result.label), `${slug}.doc`, "application/msword")}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-800 text-zinc-400 hover:text-zinc-200 hover:border-blue-600 transition-colors text-xs"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Word Doc
+                </button>
+                {/* Download PDF */}
+                <button
+                  onClick={() => downloadAsPdf(result.content, result.label, `${slug}.pdf`)}
+                  className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#2ee6a6] text-zinc-900 hover:bg-[#26c98f] transition-colors text-xs font-semibold"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Download PDF
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <button onClick={onClose} className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors">Cancel</button>
+              <button
+                onClick={generate}
+                disabled={generating}
+                className="flex items-center gap-2 bg-[#2ee6a6] text-zinc-900 rounded-lg px-5 py-2 text-sm font-semibold disabled:opacity-50 hover:bg-[#26c98f] transition-colors"
+              >
+                {generating && <span className="inline-block w-3 h-3 rounded-full border-2 border-zinc-900/20 border-t-zinc-900 animate-spin" />}
+                {generating ? "Generating…" : "Generate"}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ChatView({ conversation, blocks, projectName, sidebarOpen, onToggleSidebar, onUpdate, onBranch, targetMsgIdx }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>(() => getDisplayMessages(conversation));
   const [input, setInput] = useState("");
@@ -363,8 +685,9 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
   );
   const [currentModel, setCurrentModel] = useState(conversation.modelName);
   const [hasIndexedFiles, setHasIndexedFiles] = useState(false);
-  const [retrievedFiles, setRetrievedFiles] = useState<{ id: string; path: string; selected: boolean }[]>([]);
+  const [retrievedFiles, setRetrievedFiles] = useState<{ id: string; path: string }[]>([]);
   const [searchingFiles, setSearchingFiles] = useState(false);
+  const [showDocModal, setShowDocModal] = useState(false);
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
 
   // Stable index of the message to scroll to — provided directly by the search result
@@ -400,7 +723,7 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
         const pid = (conversation as any).projectId as string;
         const r = await fetch(`/api/projects/${pid}/files/search?q=${encodeURIComponent(input.trim())}`);
         const d = await r.json();
-        setRetrievedFiles((d.files ?? []).map((f: { id: string; path: string }) => ({ ...f, selected: true })));
+        setRetrievedFiles(d.files ?? []);
       } catch {}
       setSearchingFiles(false);
     }, 700);
@@ -509,8 +832,6 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
     const userMessage = input.trim();
     const attachments: FileAttachment[] = pendingAttachments.map(({ preview: _, ...a }) => a);
 
-    const selectedFileIds = retrievedFiles.filter((f) => f.selected).map((f) => f.id);
-
     setInput("");
     setPendingAttachments([]);
     setRetrievedFiles([]);
@@ -527,7 +848,6 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
           includedBlockIds: Array.from(activeBlockIds),
           attachments,
           model: currentModel,
-          ...(selectedFileIds.length > 0 ? { fileIds: selectedFileIds } : {}),
         }),
       });
       let json: any;
@@ -553,6 +873,10 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
   return (
     <div className="relative flex flex-col h-full">
       {/* Header — hidden in full-screen mode */}
+      {showDocModal && (
+        <GenerateDocModal conversationId={conversation.id} onClose={() => setShowDocModal(false)} />
+      )}
+
       {sidebarOpen && <div className="border-b border-teal-900 shrink-0 flex items-center gap-3 px-4 h-14">
         <button
           onClick={onToggleSidebar}
@@ -582,6 +906,19 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
             </p>
           </div>
         )}
+        <button
+          onClick={() => setShowDocModal(true)}
+          title="Generate documentation from this conversation"
+          className="shrink-0 p-1.5 rounded-lg text-zinc-500 hover:text-[#2ee6a6] hover:bg-[#2ee6a6]/10 transition-colors"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="16" y1="13" x2="8" y2="13" />
+            <line x1="16" y1="17" x2="8" y2="17" />
+            <polyline points="10 9 9 9 8 9" />
+          </svg>
+        </button>
       </div>}
 
       {/* Floating exit button — only visible in full-screen mode */}
@@ -690,7 +1027,7 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
           </div>
         )}
 
-        {/* Retrieved files panel — shown when project has an indexed file set */}
+        {/* Retrieved files panel — read-only preview of what the server will retrieve */}
         {hasIndexedFiles && (searchingFiles || retrievedFiles.length > 0) && (
           <div className="border border-blue-800 rounded-lg p-2.5 space-y-1.5 bg-[#080f1f]">
             <div className="flex items-center justify-between">
@@ -698,7 +1035,7 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
                 {searchingFiles ? (
                   <><span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-zinc-600/30 border-t-zinc-500 animate-spin" />Searching files…</>
                 ) : (
-                  <><span className="text-[#2ee6a6]">⌖</span>{retrievedFiles.filter((f) => f.selected).length} / {retrievedFiles.length} files for this query</>
+                  <><span className="text-[#2ee6a6]">⌖</span>{retrievedFiles.length} file{retrievedFiles.length !== 1 ? "s" : ""} queued for this query</>
                 )}
               </span>
               {!searchingFiles && (
@@ -708,19 +1045,10 @@ export function ChatView({ conversation, blocks, projectName, sidebarOpen, onTog
             {!searchingFiles && retrievedFiles.length > 0 && (
               <div className="space-y-0.5 max-h-28 overflow-y-auto pr-1">
                 {retrievedFiles.map((f) => (
-                  <label key={f.id} className="flex items-center gap-2 cursor-pointer group py-0.5">
-                    <input
-                      type="checkbox"
-                      checked={f.selected}
-                      onChange={() => setRetrievedFiles((prev) =>
-                        prev.map((rf) => rf.id === f.id ? { ...rf, selected: !rf.selected } : rf)
-                      )}
-                      className="accent-[#2ee6a6] shrink-0"
-                    />
-                    <span className="text-[11px] font-mono text-zinc-400 group-hover:text-zinc-200 transition-colors truncate">
-                      {f.path}
-                    </span>
-                  </label>
+                  <div key={f.id} className="flex items-center gap-2 py-0.5">
+                    <span className="text-[#2ee6a6]/50 shrink-0 text-[10px]">›</span>
+                    <span className="text-[11px] font-mono text-zinc-400 truncate">{f.path}</span>
+                  </div>
                 ))}
               </div>
             )}

@@ -20,23 +20,53 @@ model Project {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  contextBlocks ContextBlock[]
-  prompts       Prompt[]
-  projectFiles  ProjectFile[]
+  contextBlocks   ContextBlock[]
+  prompts         Prompt[]
+  projectFiles    ProjectFile[]
+  projectMemories ProjectMemory[]
+  fileChunks      ProjectFileChunk[]
 
   @@index([createdAt])
 }
 
 model ProjectFile {
+  id        String                  @id @default(cuid())
+  projectId String
+  project   Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  path      String
+  content   String                  @db.Text
+  summary   String?                 @db.Text
+  embedding Unsupported("vector(1024)")?
+  createdAt DateTime                @default(now())
+
+  @@index([projectId])
+}
+
+model ProjectMemory {
   id        String   @id @default(cuid())
   projectId String
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  path      String
   content   String   @db.Text
-  summary   String?  @db.Text
   createdAt DateTime @default(now())
 
   @@index([projectId])
+}
+
+model ProjectFileChunk {
+  id        String                       @id @default(cuid())
+  projectId String
+  project   Project                      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  filePath  String
+  chunkType String                       // "class" | "method" | "function"
+  name      String
+  content   String                       @db.Text
+  startLine Int
+  endLine   Int
+  embedding Unsupported("vector(1024)")?
+  createdAt DateTime                     @default(now())
+
+  @@index([projectId])
+  @@index([projectId, filePath])
 }
 
 model ContextBlock {

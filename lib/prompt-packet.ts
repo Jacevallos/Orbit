@@ -53,6 +53,7 @@ export function buildSystemPrompt(
   project: Pick<Project, "name" | "description" | "goal">,
   blocks: ContextBlock[],
   taskType?: TaskType | null,
+  memories?: string[],
 ): string {
   const ordered = [...blocks].sort((a, b) => {
     if (b.priority !== a.priority) return b.priority - a.priority;
@@ -63,6 +64,10 @@ export function buildSystemPrompt(
   sections.push(`PROJECT: ${project.name}`);
   if (project.description) sections.push(`DESCRIPTION: ${project.description}`);
   if (project.goal) sections.push(`GOAL: ${project.goal}`);
+
+  if (memories && memories.length > 0) {
+    sections.push(`PROJECT MEMORY (facts learned from past conversations):\n${memories.map((m) => `• ${m}`).join("\n")}`);
+  }
 
   if (ordered.length > 0) {
     sections.push("CONTEXT:");

@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { buildSystemPrompt, type TaskType } from "@/lib/prompt-packet";
+import { getProjectMemories, extractAndStoreMemories } from "@/lib/memory";
 import { runAnthropic, type ChatMessage, type FileAttachment, type ContextFileBlock } from "@/lib/anthropic";
 import { logger } from "@/lib/logger";
-import { smartSearchProjectFiles, buildFileContext, buildSummaryContext, countProjectFiles } from "@/lib/file-search";
+import { smartSearchProjectFiles, buildFileContext, buildSummaryContext, buildChunkContext, countProjectFiles } from "@/lib/file-search";
 import type { ContextBlock } from "@prisma/client";
 
 interface Params {
@@ -153,9 +154,9 @@ export async function POST(req: NextRequest, { params }: Params) {
   // Retrieve relevant files: use explicitly selected fileIds or auto-FTS
   let fileContextStr = "";
   let retrievedCount = 0;
+  let retrievedPaths: string[] = [];
   if (useFileFts) {
     if (Array.isArray(fileIds) && fileIds.length > 0) {
-      // Explicit file selection from UI — always full content + chunking
       const explicit = await prisma.$queryRaw<{ path: string; content: string; summary?: string | null }[]>`
         SELECT path, content, summary FROM "ProjectFile"
         WHERE id = ANY(${fileIds}::text[]) AND "projectId" = ${conversation.projectId}
@@ -163,22 +164,31 @@ export async function POST(req: NextRequest, { params }: Params) {
       if (explicit.length > 0) {
         fileContextStr = buildFileContext(explicit, { query: content });
         retrievedCount = explicit.length;
+        retrievedPaths = explicit.map((f) => f.path);
       }
     } else {
-      // Enrich vague follow-up queries ("implement this", "another way?") with
-      // identifiers from recent messages so FTS finds the right files.
       const hint = buildConversationQueryHint(displayMessages);
       const searchQuery = hint ? `${content.trim()} ${hint}` : content.trim();
 
-      const { files, useSummaries } = await smartSearchProjectFiles(conversation.projectId, searchQuery, 14);
-      if (files.length > 0) {
+      const { files, chunks, useSummaries } = await smartSearchProjectFiles(conversation.projectId, searchQuery, 14);
+      if (chunks.length > 0) {
+        fileContextStr = buildChunkContext(chunks);
+        retrievedCount = chunks.length;
+        retrievedPaths = [...new Set(chunks.map((c) => `${c.filePath} (${c.name}, lines ${c.startLine}-${c.endLine})`))];
+      } else if (files.length > 0) {
         fileContextStr = useSummaries
           ? buildSummaryContext(files)
           : buildFileContext(files, { query: content });
         retrievedCount = files.length;
+        retrievedPaths = files.map((f) => f.path);
       }
     }
   }
+
+  // Fetch memories for this project — injected into system prompt so Claude
+  // knows established facts without the user having to repeat them.
+  const memoryEntries = await getProjectMemories(conversation.projectId);
+  const memoryStrings = memoryEntries.map((m) => m.content);
 
   // System prompt contains only stable content (project info + generated context blocks).
   // This never changes between messages so prompt caching reliably hits every turn.
@@ -186,6 +196,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     { name: conversation.project.name, description: conversation.project.description, goal: conversation.project.goal },
     textBlocks,
     conversation.taskType as TaskType | null,
+    memoryStrings,
   );
   system = stripNullBytes(system);
   system = smartTruncate(system, MAX_SYSTEM_CHARS);
@@ -244,7 +255,17 @@ export async function POST(req: NextRequest, { params }: Params) {
     // Return only a lightweight response — NOT the full conversation object.
     // Returning updated.messages (which can be huge with large context history) was
     // causing "Unexpected end of JSON input" on the client due to response body size.
+    // Extract memories from this exchange every other turn to avoid over-calling Haiku.
+    // Fire-and-forget — doesn't block the response.
+    if (updatedMessages.length % 4 === 0) {
+      const lastExchange = updatedMessages.slice(-2);
+      extractAndStoreMemories(conversation.projectId, lastExchange, memoryStrings).catch(() => {});
+    }
+
     logger.info("message.complete", { promptId: params.id, inputTokens: result.inputTokens, outputTokens: result.outputTokens, cacheCreation: result.cacheCreationTokens, cacheRead: result.cacheReadTokens, retrievedFiles: retrievedCount });
+    if (retrievedPaths.length > 0) {
+      logger.info("message.retrieved", { promptId: params.id, files: retrievedPaths });
+    }
     return NextResponse.json({
       reply: result.text,
       inputTokens: updated.inputTokens,

@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import type { Prompt, ContextBlock } from "@prisma/client";
 import { ContextVault } from "./ContextVault";
+import { MemoryPanel } from "./MemoryPanel";
 import { formatTokens } from "@/lib/tokens";
 import { ErrorToast } from "@/components/ErrorToast";
 import { AVAILABLE_MODELS, DEFAULT_MODEL_ID } from "@/lib/models";
@@ -80,8 +81,18 @@ export function ConversationSidebar({
   const [includedIds, setIncludedIds] = useState<Set<string>>(
     () => new Set(blocks.map((b) => b.id))
   );
+
+  // Remove stale IDs whenever blocks are added or deleted
+  useEffect(() => {
+    const validIds = new Set(blocks.map((b) => b.id));
+    setIncludedIds((prev) => {
+      const filtered = new Set([...prev].filter((id) => validIds.has(id)));
+      return filtered.size === prev.size ? prev : filtered;
+    });
+  }, [blocks]);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL_ID);
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  const [vaultOpen, setVaultOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -320,17 +331,32 @@ export function ConversationSidebar({
       {/* Token Usage */}
       <TokenUsagePanel conversations={conversations} />
 
-      {/* Context Vault (collapsible at bottom) */}
-      <div className="shrink-0 border-t border-teal-900">
-        <details>
-          <summary className="px-4 py-2.5 text-xs text-zinc-400 cursor-pointer hover:text-zinc-200 transition-colors select-none uppercase tracking-wide font-medium">
-            Context Vault ({blocks.length})
-          </summary>
-          <div className="px-2 pb-2 max-h-64 overflow-y-auto">
-            <ContextVault projectId={projectId} blocks={blocks} />
+      <MemoryPanel projectId={projectId} />
+
+      {/* Context Vault button */}
+      <div className="shrink-0 border-t border-teal-900 px-3 py-3">
+        <button
+          onClick={() => setVaultOpen(true)}
+          className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl border border-blue-800 text-zinc-300 hover:text-white hover:border-[#2ee6a6]/50 hover:bg-[#2ee6a6]/5 transition-all group"
+        >
+          <div className="flex items-center gap-2.5">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="text-[#2ee6a6]">
+              <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+            </svg>
+            <span className="text-sm font-medium">Context Vault</span>
           </div>
-        </details>
+          <span className="text-xs text-zinc-500 group-hover:text-zinc-400">{blocks.length} block{blocks.length !== 1 ? "s" : ""}</span>
+        </button>
       </div>
+
+      {vaultOpen && (
+        <ContextVault
+          projectId={projectId}
+          blocks={blocks}
+          isModal
+          onClose={() => setVaultOpen(false)}
+        />
+      )}
     </div>
   );
 }

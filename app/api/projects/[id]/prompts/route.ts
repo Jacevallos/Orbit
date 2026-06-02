@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { buildSystemPrompt, buildPromptPacket, type TaskType } from "@/lib/prompt-packet";
 import { runAnthropic, DEFAULT_CLAUDE_MODEL, type FileAttachment, type ContextFileBlock } from "@/lib/anthropic";
 import { logger } from "@/lib/logger";
-import { smartSearchProjectFiles, buildFileContext, buildSummaryContext, countProjectFiles } from "@/lib/file-search";
+import { smartSearchProjectFiles, buildFileContext, buildSummaryContext, buildChunkContext, countProjectFiles } from "@/lib/file-search";
 import type { ContextBlock } from "@prisma/client";
 
 interface Params {
@@ -92,8 +92,10 @@ export async function POST(req: NextRequest, { params }: Params) {
 
   let fileContextStr = "";
   if (useFileFts) {
-    const { files, useSummaries } = await smartSearchProjectFiles(project.id, userPrompt, 14);
-    if (files.length > 0) {
+    const { files, chunks, useSummaries } = await smartSearchProjectFiles(project.id, userPrompt, 14);
+    if (chunks.length > 0) {
+      fileContextStr = buildChunkContext(chunks);
+    } else if (files.length > 0) {
       fileContextStr = useSummaries
         ? buildSummaryContext(files)
         : buildFileContext(files, { query: userPrompt });

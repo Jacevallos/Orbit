@@ -181,8 +181,89 @@ export function hasStrongCodeIdentifiers(query: string): boolean {
   return false;
 }
 
-// Phase 1 of two-phase routing: ask Haiku which files are relevant.
-// Uses path + summary (when available) so Haiku can make better decisions.
+export interface CodeChunkResult {
+  id: string;
+  filePath: string;
+  chunkType: string;
+  name: string;
+  content: string;
+  startLine: number;
+  endLine: number;
+}
+
+// Vector search over individual function/class chunks — more precise than
+// whole-file search because each chunk is a complete, named code unit.
+async function vectorSearchChunks(
+  projectId: string,
+  query: string,
+  limit: number,
+): Promise<CodeChunkResult[]> {
+  const { embedQuery, toVectorLiteral } = await import("@/lib/embeddings");
+  const queryVec = await embedQuery(query);
+  const vecLiteral = toVectorLiteral(queryVec);
+
+  const rows = await prisma.$queryRaw<CodeChunkResult[]>`
+    SELECT id, "filePath", "chunkType", name, content, "startLine", "endLine"
+    FROM "ProjectFileChunk"
+    WHERE "projectId" = ${projectId}
+      AND embedding IS NOT NULL
+    ORDER BY embedding <=> ${vecLiteral}::vector
+    LIMIT ${limit}
+  `;
+  return rows;
+}
+
+async function hasChunkIndex(projectId: string): Promise<boolean> {
+  const rows = await prisma.$queryRaw<[{ count: bigint }]>`
+    SELECT COUNT(*) as count FROM "ProjectFileChunk"
+    WHERE "projectId" = ${projectId} AND embedding IS NOT NULL
+  `;
+  return Number(rows[0]?.count ?? 0) > 0;
+}
+
+// Build context string from chunks — shows file path, function name, and line range
+// so Claude knows exactly where in the codebase each piece of code lives.
+export function buildChunkContext(chunks: CodeChunkResult[]): string {
+  if (chunks.length === 0) return "";
+  const parts = chunks.map((c) =>
+    `--- ${c.filePath} (lines ${c.startLine}-${c.endLine}: ${c.name}) ---\n${c.content}`
+  );
+  return `RELEVANT CODE (${parts.length} function${parts.length !== 1 ? "s" : ""} retrieved for this query):\n\n${parts.join("\n\n")}`;
+}
+
+// Vector search using pgvector cosine similarity.
+// Replaces Haiku routing for broad/natural-language queries — faster, cheaper,
+// and understands meaning rather than just matching keywords or file names.
+async function vectorSearchProjectFiles(
+  projectId: string,
+  query: string,
+  limit: number,
+): Promise<ProjectFileResult[]> {
+  const { embedQuery, toVectorLiteral } = await import("@/lib/embeddings");
+  const queryVec = await embedQuery(query);
+  const vecLiteral = toVectorLiteral(queryVec);
+
+  const rows = await prisma.$queryRaw<ProjectFileResult[]>`
+    SELECT id, path, content, summary, LEFT(content, 400) as excerpt
+    FROM "ProjectFile"
+    WHERE "projectId" = ${projectId}
+      AND embedding IS NOT NULL
+    ORDER BY embedding <=> ${vecLiteral}::vector
+    LIMIT ${limit}
+  `;
+  return rows;
+}
+
+async function hasVectorIndex(projectId: string): Promise<boolean> {
+  const rows = await prisma.$queryRaw<[{ count: bigint }]>`
+    SELECT COUNT(*) as count FROM "ProjectFile"
+    WHERE "projectId" = ${projectId} AND embedding IS NOT NULL
+  `;
+  return Number(rows[0]?.count ?? 0) > 0;
+}
+
+// Phase 1: ask Haiku which files are candidates based on paths + summaries.
+// Prompt is deliberately conservative — "only files whose code is directly needed".
 async function routeWithHaiku(
   projectId: string,
   query: string,
@@ -196,7 +277,6 @@ async function routeWithHaiku(
   `;
   if (pathRows.length === 0) return [];
 
-  // Include summaries in file listing if available — helps Haiku pick better
   const fileList = pathRows.map((f) =>
     f.summary ? `${f.path}: ${f.summary.slice(0, 120)}` : f.path
   ).join("\n");
@@ -205,13 +285,14 @@ async function routeWithHaiku(
   try {
     const result = await runAnthropic({
       model: "claude-haiku-4-5-20251001",
-      system: `You are a code file selector. Given a list of file paths (and optional summaries) and a question, return the paths of the ${limit} files most relevant to answering the question.
-Return ONLY a valid JSON array of file path strings — no explanation, no markdown, just JSON. Example: ["src/Foo.cs","src/Bar.cs"]`,
+      system: `You are a precise code file selector. Given file paths (and optional summaries) and a question, return ONLY the files whose source code is directly needed to answer the question.
+Be strict — prefer 3-6 highly relevant files over a large list of loosely related ones. Do not include files just because they're in the same module or package.
+Return ONLY a valid JSON array of file path strings. Example: ["src/Foo.cs","src/Bar.cs"]`,
       messages: [{
         role: "user",
         content: `Files:\n${fileList}\n\nQuestion: ${query}`,
       }],
-      maxTokens: 1024,
+      maxTokens: 512,
     });
 
     const cleaned = result.text
@@ -237,43 +318,127 @@ Return ONLY a valid JSON array of file path strings — no explanation, no markd
   return files;
 }
 
-// FTS results are already ranked by relevance — the top 8 are the signal, beyond that is noise.
-// Haiku routing covers broad queries where wider file coverage improves answer quality.
-const FTS_LIMIT = 8;
+// Phase 2: given initial candidates, ask Haiku to filter to only the files
+// whose content is DIRECTLY needed — using a content excerpt per file for higher
+// signal than just paths. Costs ~$0.0003 per call but prevents sending 10-15
+// loosely related files to the main model.
+async function rerankByRelevance(
+  files: ProjectFileResult[],
+  query: string,
+  maxFiles = 5,
+): Promise<ProjectFileResult[]> {
+  if (files.length <= maxFiles) return files;
+
+  const fileList = files.map((f, i) => {
+    const preview = (f.summary || f.content).slice(0, 250).replace(/\n+/g, " ");
+    return `[${i}] ${f.path}: ${preview}`;
+  }).join("\n\n");
+
+  try {
+    const result = await runAnthropic({
+      model: "claude-haiku-4-5-20251001",
+      system: `You output ONLY a valid JSON array of integers — no explanation, no text, nothing else.
+Select the indices of files directly needed to answer the question. Maximum ${maxFiles} indices.
+Example: [0, 2, 4]`,
+      messages: [{
+        role: "user",
+        content: `Question: ${query}\n\nFiles:\n${fileList}`,
+      }],
+      maxTokens: 60,
+    });
+
+    // Extract a JSON array from the response even if Haiku adds surrounding text
+    const arrayMatch = result.text.match(/\[[\d,\s]+\]/);
+    if (!arrayMatch) return files.slice(0, maxFiles);
+    const indices: unknown = JSON.parse(arrayMatch[0]);
+    if (!Array.isArray(indices) || indices.length === 0) return files.slice(0, maxFiles);
+
+    const ranked = (indices as number[])
+      .slice(0, maxFiles)
+      .map((i) => files[i])
+      .filter(Boolean) as ProjectFileResult[];
+    return ranked.length > 0 ? ranked : files.slice(0, maxFiles);
+  } catch (err) {
+    logger.warn("rerank.failed", { error: String(err) });
+    return files.slice(0, maxFiles);
+  }
+}
+
+// FTS results are ranked by relevance — retrieve up to 10, re-rank to 5.
+// Haiku routing uses same limits so both paths benefit from the second-pass filter.
+const FTS_LIMIT = 10;
+const RERANK_TARGET = 6; // raised from 5 — aggressive re-ranking was dropping important files
 
 // Smart search: FTS first (fast, no extra cost). Falls back to Haiku routing
 // only when FTS finds nothing or the query lacks specific code identifiers.
 // Returns useSummaries=true for broad queries so callers can use buildSummaryContext.
+export interface SmartSearchResult {
+  files: ProjectFileResult[];
+  chunks: CodeChunkResult[];
+  method: "fts" | "haiku" | "chunks" | "vector";
+  useSummaries: boolean;
+}
+
 export async function smartSearchProjectFiles(
   projectId: string,
   query: string,
-  haikuLimit = 14,
-): Promise<{ files: ProjectFileResult[]; method: "fts" | "haiku"; useSummaries: boolean }> {
+  haikuLimit = 10,
+): Promise<SmartSearchResult> {
   const codeQuery = hasStrongCodeIdentifiers(query);
+  const empty = { files: [], chunks: [], useSummaries: false };
 
+  // Path 1: Strong code identifiers — FTS is most reliable for exact symbols
   if (codeQuery) {
-    // FTS is relevance-ranked — cap at 8, beyond that adds noise not signal
     const ftsResults = await searchProjectFiles(projectId, query, FTS_LIMIT);
     if (ftsResults.length > 0) {
-      return { files: ftsResults, method: "fts", useSummaries: false };
+      const reranked = await rerankByRelevance(ftsResults, query, RERANK_TARGET);
+      logger.info("fts.reranked", { projectId, before: ftsResults.length, after: reranked.length });
+      return { ...empty, files: reranked, method: "fts" };
     }
   }
 
+  // Path 2: Chunk-level vector search — most precise for semantic queries.
+  // Retrieves specific functions/classes rather than whole files.
+  const useChunks = await hasChunkIndex(projectId);
+  if (useChunks) {
+    logger.info("chunk-search.start", { projectId, query: query.slice(0, 80) });
+    const chunkResults = await vectorSearchChunks(projectId, query, RERANK_TARGET);
+    if (chunkResults.length > 0) {
+      logger.info("chunk-search.complete", { projectId, count: chunkResults.length });
+      return { ...empty, chunks: chunkResults, method: "chunks" };
+    }
+  }
+
+  // Path 3: File-level vector search (whole files, semantic)
+  const useVector = await hasVectorIndex(projectId);
+  if (useVector) {
+    logger.info("vector-search.start", { projectId, query: query.slice(0, 80) });
+    const vectorResults = await vectorSearchProjectFiles(projectId, query, haikuLimit);
+    if (vectorResults.length > 0) {
+      const reranked = await rerankByRelevance(vectorResults, query, RERANK_TARGET);
+      logger.info("vector-search.complete", { projectId, before: vectorResults.length, after: reranked.length });
+      const keywords = extractKeywords(query);
+      const keywordCount = keywords ? keywords.split(" | ").length : 0;
+      const queryIsVague = !codeQuery && keywordCount <= 2;
+      const hasSummaries = queryIsVague && reranked.every((f) => f.summary);
+      return { ...empty, files: reranked, method: "vector", useSummaries: hasSummaries };
+    }
+  }
+
+  // Path 4: Haiku routing fallback (no embeddings yet)
   logger.info("haiku-routing.start", { projectId, query: query.slice(0, 80) });
   const haikuResults = await routeWithHaiku(projectId, query, haikuLimit);
-
   if (haikuResults.length > 0) {
-    logger.info("haiku-routing.complete", { projectId, count: haikuResults.length });
-    // Use summaries only for genuinely vague queries — 0-2 specific keywords, no code identifiers.
-    // Semi-specific questions ("how does auth work?") still get full content + chunking.
+    const reranked = await rerankByRelevance(haikuResults, query, RERANK_TARGET);
+    logger.info("haiku-routing.complete", { projectId, before: haikuResults.length, after: reranked.length });
     const keywords = extractKeywords(query);
     const keywordCount = keywords ? keywords.split(" | ").length : 0;
     const queryIsVague = !codeQuery && keywordCount <= 2;
-    const hasSummaries = queryIsVague && haikuResults.every((f) => f.summary);
-    return { files: haikuResults, method: "haiku", useSummaries: hasSummaries };
+    const hasSummaries = queryIsVague && reranked.every((f) => f.summary);
+    return { ...empty, files: reranked, method: "haiku", useSummaries: hasSummaries };
   }
 
-  // Last resort fallback also uses FTS limit
   const fallback = await searchProjectFiles(projectId, query, FTS_LIMIT);
-  return { files: fallback, method: "fts", useSummaries: false };
+  const rerankedFallback = await rerankByRelevance(fallback, query, RERANK_TARGET);
+  return { ...empty, files: rerankedFallback, method: "fts" };
 }

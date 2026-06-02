@@ -8,11 +8,13 @@ import { ErrorToast } from "@/components/ErrorToast";
 interface Props {
   projectId: string;
   blocks: ContextBlock[];
+  isModal?: boolean;
+  onClose?: () => void;
 }
 
 const TEXT_EXTENSIONS = [".txt",".md",".js",".ts",".jsx",".tsx",".py",".go",".rs",".java",".c",".cpp",".h",".json",".yaml",".yml",".toml",".sh",".sql",".css",".html",".xml",".csv"];
 
-export function ContextVault({ projectId, blocks }: Props) {
+export function ContextVault({ projectId, blocks, isModal, onClose }: Props) {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -31,6 +33,8 @@ export function ContextVault({ projectId, blocks }: Props) {
   const [selectedSuggestions, setSelectedSuggestions] = useState<Set<number>>(new Set());
   const [expandedSuggestion, setExpandedSuggestion] = useState<number | null>(null);
   const [analyzingBlockId, setAnalyzingBlockId] = useState<string | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   async function add() {
     if (!title.trim() || !content.trim()) return;
@@ -56,6 +60,25 @@ export function ContextVault({ projectId, blocks }: Props) {
   async function remove(id: string) {
     if (!confirm("Delete this context block?")) return;
     await fetch(`/api/context/${id}`, { method: "DELETE" });
+    router.refresh();
+  }
+
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  async function deleteSelected() {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`Delete ${selectedIds.size} context block${selectedIds.size !== 1 ? "s" : ""}?`)) return;
+    for (const id of selectedIds) {
+      await fetch(`/api/context/${id}`, { method: "DELETE" });
+    }
+    setSelectedIds(new Set());
+    setSelectionMode(false);
     router.refresh();
   }
 
@@ -343,7 +366,7 @@ export function ContextVault({ projectId, blocks }: Props) {
     try { const p = JSON.parse(content); return p._folder ? p : null; } catch { return null; }
   }
 
-  return (
+  const inner = (
     <section className="space-y-3">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-400">
@@ -362,11 +385,46 @@ export function ContextVault({ projectId, blocks }: Props) {
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
           </button>
+          {blocks.length > 0 && (
+            <button
+              onClick={() => { setSelectionMode((v) => !v); setSelectedIds(new Set()); }}
+              className={`text-xs transition-colors ${selectionMode ? "text-[#2ee6a6]" : "text-zinc-400 hover:text-zinc-100"}`}
+            >
+              {selectionMode ? "Cancel" : "Select"}
+            </button>
+          )}
           <button onClick={() => setAdding((v) => !v)} className="text-sm text-zinc-400 hover:text-zinc-100 transition-colors">
             {adding ? "Cancel" : "+ Add"}
           </button>
         </div>
       </div>
+
+      {/* Bulk delete bar */}
+      {selectionMode && (
+        <div className="flex items-center justify-between bg-blue-950 border border-blue-800 rounded-lg px-3 py-2">
+          <div className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              className="accent-[#2ee6a6]"
+              checked={selectedIds.size === blocks.length && blocks.length > 0}
+              ref={(el) => { if (el) el.indeterminate = selectedIds.size > 0 && selectedIds.size < blocks.length; }}
+              onChange={() => setSelectedIds(selectedIds.size === blocks.length ? new Set() : new Set(blocks.map((b) => b.id)))}
+            />
+            <span className="text-xs text-zinc-400">{selectedIds.size > 0 ? `${selectedIds.size} selected` : "Select all"}</span>
+          </div>
+          <button
+            onClick={deleteSelected}
+            disabled={selectedIds.size === 0}
+            className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+              <path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+            </svg>
+            Delete selected
+          </button>
+        </div>
+      )}
 
       {uploadProgress && <p className="text-xs text-[#2ee6a6]">{uploadProgress}</p>}
 
@@ -543,9 +601,30 @@ export function ContextVault({ projectId, blocks }: Props) {
           <li className="text-sm text-zinc-500">No context yet. Add text, code, or upload files above.</li>
         )}
         {blocks.map((b) => (
-          <li key={b.id} className="border border-blue-900 rounded-md bg-blue-950 p-3">
+          <li
+            key={b.id}
+            className={`border rounded-md bg-blue-950 p-3 transition-colors ${
+              selectionMode && selectedIds.has(b.id) ? "border-[#2ee6a6]/50 bg-[#2ee6a6]/5" : "border-blue-900"
+            }`}
+          >
             <div className="flex items-start justify-between gap-2">
-              <div className="font-medium text-sm">{b.title}</div>
+              <div className="flex items-start gap-2 min-w-0 flex-1">
+                {selectionMode && (
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(b.id)}
+                    onChange={() => toggleSelect(b.id)}
+                    className="accent-[#2ee6a6] mt-0.5 shrink-0 cursor-pointer"
+                  />
+                )}
+                <div
+                  className={`font-medium text-sm min-w-0 ${selectionMode ? "cursor-pointer" : ""}`}
+                  onClick={() => selectionMode && toggleSelect(b.id)}
+                >
+                  {b.title}
+                </div>
+              </div>
+              {!selectionMode && (
               <div className="flex items-center gap-2 shrink-0">
                 {parseFolderBlock(b.content) && (
                   <button
@@ -561,6 +640,7 @@ export function ContextVault({ projectId, blocks }: Props) {
                 )}
                 <button onClick={() => remove(b.id)} className="text-xs text-zinc-500 hover:text-red-400 transition-colors">Delete</button>
               </div>
+              )}
             </div>
             {b.tags.length > 0 && (
               <div className="flex flex-wrap gap-1 mt-1">
@@ -652,6 +732,37 @@ export function ContextVault({ projectId, blocks }: Props) {
         </div>
       )}
     </section>
+  );
+
+  if (!isModal) return inner;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+      <div className="w-full max-w-2xl bg-[#060e1e] border border-blue-800 rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+        {/* Modal header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-blue-900/60 shrink-0">
+          <div className="flex items-center gap-2.5">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2ee6a6" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+            </svg>
+            <span className="text-sm font-semibold text-zinc-200">Context Vault</span>
+            <span className="text-xs text-zinc-500">{blocks.length} block{blocks.length !== 1 ? "s" : ""}</span>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-zinc-500 hover:text-zinc-200 transition-colors p-1 rounded-lg hover:bg-blue-900/40"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        {/* Scrollable content */}
+        <div className="flex-1 overflow-y-auto px-6 py-5">
+          {inner}
+        </div>
+      </div>
+    </div>
   );
 }
 

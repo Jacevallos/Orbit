@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { countProjectFiles } from "@/lib/file-search";
 import { runAnthropic } from "@/lib/anthropic";
+import { embedDocuments, toVectorLiteral } from "@/lib/embeddings";
+import { extractChunks } from "@/lib/ast-chunker";
 import { logger } from "@/lib/logger";
 
 async function generateFileSummary(path: string, content: string): Promise<string | null> {
@@ -18,6 +20,10 @@ async function generateFileSummary(path: string, content: string): Promise<strin
   } catch {
     return null;
   }
+}
+
+function stripNullBytes(s: string): string {
+  return s.replace(/\x00/g, "");
 }
 
 interface Params {
@@ -44,7 +50,10 @@ export async function POST(req: NextRequest, { params }: Params) {
     `;
 
     // Phase 1: Insert all files immediately (no summaries yet — keeps indexing fast)
-    const validFiles = files.filter((f: any) => f.path && typeof f.content === "string");
+    // Strip null bytes — Postgres UTF-8 rejects 0x00 and will abort the insert.
+    const validFiles = files
+      .filter((f: any) => f.path && typeof f.content === "string")
+      .map((f: any) => ({ path: stripNullBytes(f.path), content: stripNullBytes(f.content) }));
     for (const file of validFiles) {
       await prisma.$executeRaw`
         INSERT INTO "ProjectFile" (id, "projectId", path, content, "createdAt")
@@ -72,6 +81,65 @@ export async function POST(req: NextRequest, { params }: Params) {
     }
 
     logger.info("files.summarized", { projectId: params.id, count: summarized });
+
+    // Phase 3: Generate embeddings in one batched Voyage AI call.
+    // We embed path + content excerpt so the vector captures both the file's
+    // identity and its semantic content. Voyage-code-2 is optimised for code.
+    if (process.env.VOYAGE_API_KEY) {
+      try {
+        const toEmbed = validFiles.map((f: any) =>
+          `${f.path}\n\n${f.content.slice(0, 8_000)}`
+        );
+        const embeddings = await embedDocuments(toEmbed);
+        for (let i = 0; i < validFiles.length; i++) {
+          const vec = toVectorLiteral(embeddings[i]);
+          await prisma.$executeRaw`
+            UPDATE "ProjectFile" SET embedding = ${vec}::vector
+            WHERE "projectId" = ${params.id} AND path = ${validFiles[i].path}
+          `;
+        }
+        logger.info("files.embedded", { projectId: params.id, count: validFiles.length });
+      } catch (err) {
+        logger.warn("files.embed-failed", { projectId: params.id, error: String(err) });
+      }
+    }
+
+    // Phase 4: Extract AST chunks (functions/classes) and embed each one.
+    // This enables function-level vector search instead of whole-file retrieval.
+    if (process.env.VOYAGE_API_KEY) {
+      try {
+        // Clear existing chunks for this project
+        await prisma.$executeRaw`DELETE FROM "ProjectFileChunk" WHERE "projectId" = ${params.id}`;
+
+        // Extract chunks from every file
+        const allChunks: { file: string; name: string; type: string; content: string; startLine: number; endLine: number }[] = [];
+        for (const file of validFiles) {
+          const chunks = extractChunks(file.content, file.path);
+          for (const c of chunks) {
+            allChunks.push({ file: file.path, name: c.name, type: c.type, content: c.content, startLine: c.startLine, endLine: c.endLine });
+          }
+        }
+
+        if (allChunks.length > 0) {
+          // Embed all chunks in one batched call — cheap since chunks are small
+          const chunkTexts = allChunks.map((c) => `${c.file} — ${c.name}\n\n${c.content}`);
+          const chunkEmbeddings = await embedDocuments(chunkTexts);
+
+          for (let i = 0; i < allChunks.length; i++) {
+            const c = allChunks[i];
+            const vec = toVectorLiteral(chunkEmbeddings[i]);
+            await prisma.$executeRaw`
+              INSERT INTO "ProjectFileChunk" (id, "projectId", "filePath", "chunkType", name, content, "startLine", "endLine", embedding, "createdAt")
+              VALUES (gen_random_uuid()::text, ${params.id}, ${c.file}, ${c.type}, ${c.name}, ${c.content}, ${c.startLine}, ${c.endLine}, ${vec}::vector, NOW())
+            `;
+          }
+          logger.info("chunks.indexed", { projectId: params.id, count: allChunks.length });
+        }
+      } catch (err) {
+        logger.warn("chunks.index-failed", { projectId: params.id, error: String(err) });
+      }
+    }
+
     return NextResponse.json({ indexed: validFiles.length, summarized });
   } catch (err) {
     const message = err instanceof Error ? err.message : "failed";
